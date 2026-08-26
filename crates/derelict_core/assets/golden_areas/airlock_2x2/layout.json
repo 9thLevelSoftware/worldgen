@@ -15,7 +15,7 @@
     "archetype_id": "golden",
     "cause_of_loss": "Unknown",
     "fractured": false,
-    "generator_version": 2,
+    "generator_version": 3,
     "intactness_bp": 10000,
     "name": "derelict_builder",
     "seed": 0,

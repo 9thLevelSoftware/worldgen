@@ -34,6 +34,9 @@ pub fn seed_loot(
         if e.kind != EntityKind::Container {
             continue;
         }
+        if e.tags.iter().any(|t| t == "authored_skip_loot") {
+            continue;
+        }
         let mut rng = rng::stream(master_seed, "loot", e.id as u64);
         // Debris-field crates (floating in the gap) loot as cargo.
         let room_role = role_at

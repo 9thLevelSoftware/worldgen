@@ -3,6 +3,7 @@
 //! the generator works with zero filesystem setup, and can be overridden by
 //! loading replacement RON at runtime (modding / game-side tuning).
 
+use crate::authoring::GoldenArea;
 use crate::model::{CauseOfLoss, EntityKind};
 use crate::role::Role;
 use crate::topology::TemplateSet;
@@ -38,6 +39,10 @@ pub struct ShipArchetype {
     pub cause_weights: Vec<(CauseOfLoss, u32)>,
     /// Max breach count at intactness 0.
     pub max_breaches: u8,
+    /// Golden-area ids to stamp into compatible rooms. Empty = no stamps
+    /// (default archetypes stay unstamped until a fixture opts in).
+    #[serde(default)]
+    pub golden_stamps: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -111,6 +116,7 @@ pub struct GenData {
     pub furnishing: FurnishingRules,
     pub loot: LootTables,
     pub items: ItemRegistry,
+    pub golden_areas: BTreeMap<String, GoldenArea>,
 }
 
 #[derive(Debug)]
@@ -139,6 +145,7 @@ const DEFAULT_ARCHETYPES: &[&str] = &[
 const DEFAULT_FURNISHING: &str = include_str!("../assets/furnishing_rules/default.ron");
 const DEFAULT_LOOT: &str = include_str!("../assets/loot_tables/default.ron");
 const DEFAULT_ITEMS: &str = include_str!("../assets/items.ron");
+const DEFAULT_GOLDENS: &[&str] = &[include_str!("../assets/golden_areas/airlock_2x2.json")];
 
 impl GenData {
     /// Load the embedded default content bundle.
@@ -156,12 +163,19 @@ impl GenData {
         let items: ItemRegistry =
             ron::from_str(DEFAULT_ITEMS).map_err(|e| DataError::Parse(e.to_string()))?;
         let templates = TemplateSet::default_bundle().map_err(DataError::Parse)?;
+        let mut golden_areas = BTreeMap::new();
+        for src in DEFAULT_GOLDENS {
+            let g: GoldenArea =
+                serde_json::from_str(src).map_err(|e| DataError::Parse(e.to_string()))?;
+            golden_areas.insert(g.id.clone(), g);
+        }
         let data = Self {
             archetypes,
             templates,
             furnishing,
             loot,
             items,
+            golden_areas,
         };
         data.validate()?;
         Ok(data)
@@ -218,6 +232,13 @@ impl GenData {
                     "archetype '{id}': no template can satisfy guaranteed roles {:?} at {} deck(s)",
                     a.guaranteed_roles, a.decks.0
                 )));
+            }
+            for stamp_id in &a.golden_stamps {
+                if !self.golden_areas.contains_key(stamp_id) {
+                    return Err(DataError::Validation(format!(
+                        "archetype '{id}': unknown golden stamp '{stamp_id}'"
+                    )));
+                }
             }
         }
         for (room, entries) in &self.loot.tables {

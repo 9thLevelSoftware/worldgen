@@ -5,6 +5,7 @@
 //! a float or an unordered collection — generated ships must serialize to
 //! byte-identical output for identical (seed, params, GENERATOR_VERSION).
 
+use crate::authoring::AuthoredHazards;
 use crate::role::Role;
 use crate::structural::plan::{RoomId, StructuralPlan, Topology};
 use serde::{Deserialize, Serialize};
@@ -12,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Bumped on ANY change that alters generated output (stage logic, RNG
 /// consumption order, archetype schema). Baked into ships and save diffs.
-pub const GENERATOR_VERSION: u32 = 2;
+pub const GENERATOR_VERSION: u32 = 3;
 
 /// Intactness is fixed-point: 0..=10000 basis points (10000 = pristine).
 pub type Intactness = u16;
@@ -338,6 +339,10 @@ pub struct Ship {
     pub damage_events: Vec<DamageEvent>,
     pub fractured: bool,
     pub fragments: Vec<ShipFragment>,
+    /// Authored LinkZones from occupancy stamps. `to_layout_json` merges these
+    /// into overlay arrays; `hazard_source` stays `"runtime"` on generated ships.
+    #[serde(default)]
+    pub hazard_overlay: AuthoredHazards,
 }
 
 impl Ship {
