@@ -41,7 +41,7 @@ func _ready() -> void:
 	_resolve_content()
 	_schedule_compile()
 	_sync_deck_label()
-	_status.text = "LMB paint · RMB erase · click room stamps role · Q/E [ ] deck · MMB pan/orbit · wheel zoom"
+	_status.text = "LMB paint · RMB erase · click other room stamps role · room list inspects · Q/E [ ] deck · MMB pan/orbit · wheel zoom"
 
 
 func _unhandled_input(event: InputEvent) -> void:

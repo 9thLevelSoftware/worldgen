@@ -31,7 +31,7 @@ func _ready() -> void:
 	add_child(title)
 
 	_empty = Label.new()
-	_empty.text = "Click an occupied cell to select a room."
+	_empty.text = "Room list: inspect only. Occupied cell: stamp+select (re-click the same room to inspect)."
 	_empty.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	add_child(_empty)
 

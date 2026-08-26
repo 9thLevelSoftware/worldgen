@@ -372,7 +372,11 @@ func _try_lmb(cell: Vector3i) -> bool:
 	var key := _key(cell)
 	if _occupancy.has(key):
 		var id := int(_occupancy[key])
-		var stamped := _stamp_room_id(id, active_role)
+		# Re-click of the active room is inspect-only so inspector role
+		# edits are not overwritten by the armed palette stamp.
+		var stamped := false
+		if id != _selected_id:
+			stamped = _stamp_room_id(id, active_role)
 		select_room_id(id)
 		if stamped:
 			occupancy_changed.emit()
@@ -553,7 +557,7 @@ func _update_ghost(cell: Vector3i) -> void:
 			if int(r["id"]) == id:
 				sid = str(r["stable_id"])
 				break
-		if sid.is_empty() or str(_room_role(id)) == active_role:
+		if id == _selected_id or sid.is_empty() or str(_room_role(id)) == active_role:
 			hover_info.emit("select %s  (%d,%d deck %d)" % [sid, cell.x, cell.y, cell.z])
 		else:
 			hover_info.emit("stamp %s on %s  (%d,%d deck %d)" % [
