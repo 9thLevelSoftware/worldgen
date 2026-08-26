@@ -5,15 +5,18 @@
 //! recompile + POST-DAMAGE validation, bounded retries] → loot → raster
 //! projection → Ship. Every failure is typed; there is no best-effort ship.
 
-use crate::archetype::GenData;
+use crate::archetype::{GenData, ItemRegistry};
+use crate::authoring::{compile_authored, AuthoredProp, InventoryMode};
 use crate::model::*;
 use crate::rng::{self, roll_range, weighted_choice};
 use crate::stages::{damage, furnish, hull, loot, story};
-use crate::structural::compile::{compile, DefaultModulePicker};
+use crate::structural::compile::DefaultModulePicker;
 use crate::structural::plan::{EdgeKind, RoomId as PlanRoomId, StructuralPlan, Topology};
 use crate::structural::project::project_to_raster;
 use crate::structural::validate::{validate, ValidationPolicy, ValidationStage};
-use crate::topology::{place_topology, residual_fill, RoleParams, TemplateDef};
+use crate::topology::{
+    apply_golden_stamps, place_topology, residual_fill, RoleParams, TemplateDef,
+};
 use std::collections::BTreeMap;
 use std::time::Instant;
 
@@ -164,6 +167,12 @@ pub fn generate_ship_timed(
     };
     lap("template", &mut timings, &mut mark);
 
+    let stamps: Vec<&crate::authoring::GoldenArea> = arch
+        .golden_stamps
+        .iter()
+        .filter_map(|id| data.golden_areas.get(id))
+        .collect();
+
     // --- Topology placement + compile + pre-damage validation (retries) -----
     let mut placed = None;
     let mut last_err: Option<GenError> = None;
@@ -181,6 +190,14 @@ pub fn generate_ship_timed(
                     continue;
                 }
             };
+        let stamped = match apply_golden_stamps(&mut candidate, &stamps, &hull_plan.deck_masks) {
+            Ok(s) => s,
+            Err(e) => {
+                // Fail this stamp+offset; keep the template in the pool.
+                last_err = Some(GenError::TopologyFailed(e.to_string()));
+                continue;
+            }
+        };
         let mut frng = rng::stream(seed, "residual_fill", attempt);
         residual_fill(
             &mut frng,
@@ -188,7 +205,11 @@ pub fn generate_ship_timed(
             &hull_plan.deck_masks,
             &arch.filler_roles,
         );
-        let plan = compile(&candidate.topology, &DefaultModulePicker);
+        let (plan, _stale) = compile_authored(
+            &candidate.topology,
+            &DefaultModulePicker,
+            &stamped.overrides,
+        );
         if !plan.errors.is_empty() {
             last_err = Some(GenError::StructuralCompileFailed(plan.errors.clone()));
             continue;
@@ -196,7 +217,7 @@ pub fn generate_ship_timed(
         let policy = ValidationPolicy::pre_damage(candidate.critical_path.clone());
         match validate(&plan, &candidate.topology, &policy) {
             Ok(_) => {
-                placed = Some((candidate, plan));
+                placed = Some((candidate, plan, stamped));
                 break;
             }
             Err(issues) => {
@@ -207,17 +228,28 @@ pub fn generate_ship_timed(
             }
         }
     }
-    let (placed, _pre_plan) = placed.ok_or_else(|| GenError::RetriesExhausted {
+    let (placed, _pre_plan, stamped) = placed.ok_or_else(|| GenError::RetriesExhausted {
         attempts: TOPOLOGY_ATTEMPTS,
         last: Box::new(last_err.unwrap_or(GenError::TopologyFailed("no attempt ran".into()))),
     })?;
     lap("topology", &mut timings, &mut mark);
 
     // --- Furnish (locks write back into topology portal states) -------------
-    let mut plan = compile(&placed.topology, &DefaultModulePicker);
-    let furnish_out = furnish::furnish(seed, &placed.topology, &mut plan, &data.furnishing);
-    let entities = furnish_out.entities;
-    let next_entity_id = furnish_out.next_entity_id;
+    let (mut plan, _stale) =
+        compile_authored(&placed.topology, &DefaultModulePicker, &stamped.overrides);
+    let furnish_out = furnish::furnish(
+        seed,
+        &placed.topology,
+        &mut plan,
+        &data.furnishing,
+        &stamped.skip_furnish,
+    );
+    let mut entities = furnish_out.entities;
+    let mut next_entity_id = furnish_out.next_entity_id;
+    for prop in &stamped.props {
+        entities.push(authored_entity(prop, next_entity_id, &data.items));
+        next_entity_id += 1;
+    }
     lap("furnish", &mut timings, &mut mark);
 
     // --- Story --------------------------------------------------------------
@@ -254,7 +286,8 @@ pub fn generate_ship_timed(
             arch,
             &[placed.entry_room, placed.goal_room],
         );
-        let mut plan2 = compile(&topo2, &DefaultModulePicker);
+        let (mut plan2, _stale) =
+            compile_authored(&topo2, &DefaultModulePicker, &stamped.overrides);
         if !plan2.errors.is_empty() {
             last_err = Some(GenError::StructuralCompileFailed(plan2.errors.clone()));
             continue;
@@ -392,6 +425,7 @@ pub fn generate_ship_timed(
         damage_events: outcome.events,
         fractured: outcome.fractured,
         fragments,
+        hazard_overlay: stamped.hazards,
     };
     Ok(GenReport {
         ship,
@@ -522,4 +556,39 @@ fn build_room_graph(
 enum EdgeKind2 {
     Door,
     Breach,
+}
+
+fn authored_entity(prop: &AuthoredProp, id: u32, items: &ItemRegistry) -> EntitySpec {
+    let deck = u8::try_from(prop.cell[2]).unwrap_or(0);
+    let inventory = match prop.inventory_mode {
+        InventoryMode::Explicit => prop
+            .inventory
+            .iter()
+            .filter_map(|s| {
+                items.id_of(&s.item_id).map(|item_id| ItemStack {
+                    item_id,
+                    qty: s.qty,
+                })
+            })
+            .collect(),
+        InventoryMode::LootTable | InventoryMode::Empty => Vec::new(),
+    };
+    let mut tags = vec!["authored_prop".into()];
+    if matches!(
+        prop.inventory_mode,
+        InventoryMode::Explicit | InventoryMode::LootTable
+    ) {
+        tags.push("authored_skip_loot".into());
+    }
+    EntitySpec {
+        id,
+        kind: prop.kind,
+        proto: prop.proto.clone(),
+        pos: GridPos::new(prop.cell[0], prop.cell[1], deck),
+        rotation: prop.rotation,
+        locked: prop.locked,
+        open: false,
+        inventory,
+        tags,
+    }
 }

@@ -2,14 +2,17 @@
 //! placement into hull masks — every template must place, connect, compile,
 //! and validate across a spread of seeds.
 
+use derelict_core::authoring::{compile_authored, GoldenArea};
 use derelict_core::rng;
 use derelict_core::role::Role;
 use derelict_core::stages::hull::Mask;
 use derelict_core::structural::compile::{compile, DefaultModulePicker};
-use derelict_core::structural::plan::NO_ROOM;
+use derelict_core::structural::plan::{Cell, EdgeKind, PortalIntent, RoomSpec, Topology, NO_ROOM};
 use derelict_core::structural::validate::{validate, ValidationPolicy};
-use derelict_core::topology::{place_topology, RoleParams, TemplateSet};
-use std::collections::BTreeSet;
+use derelict_core::topology::{
+    apply_golden_stamps, place_topology, PlacedTopology, RoleParams, TemplateSet,
+};
+use std::collections::{BTreeMap, BTreeSet};
 
 fn rect_masks(width: u16, height: u16, decks: usize) -> Vec<Mask> {
     let mut masks = Vec::new();
@@ -194,4 +197,102 @@ fn hazard_comfort_never_adjacent() {
             }
         }
     }
+}
+
+fn airlock_2x2() -> GoldenArea {
+    serde_json::from_str(include_str!("../assets/golden_areas/airlock_2x2.json")).unwrap()
+}
+
+fn west_airlock_placed() -> (PlacedTopology, Vec<Mask>) {
+    let masks = rect_masks(12, 10, 1);
+    let airlock_cells = vec![
+        Cell::new(0, 4, 2),
+        Cell::new(0, 5, 2),
+        Cell::new(0, 4, 3),
+        Cell::new(0, 5, 3),
+    ];
+    let corridor_cells = vec![
+        Cell::new(0, 0, 2),
+        Cell::new(0, 1, 2),
+        Cell::new(0, 2, 2),
+        Cell::new(0, 3, 2),
+    ];
+    let placed = PlacedTopology {
+        topology: Topology {
+            rooms: vec![
+                RoomSpec {
+                    id: 1,
+                    role: Role::Airlock,
+                    deck: 0,
+                    cells: airlock_cells,
+                },
+                RoomSpec {
+                    id: 2,
+                    role: Role::Corridor,
+                    deck: 0,
+                    cells: corridor_cells,
+                },
+            ],
+            portals: vec![
+                PortalIntent {
+                    from_room: 1,
+                    to_room: 2,
+                    from_cell: Cell::new(0, 4, 2),
+                    to_cell: Cell::new(0, 3, 2),
+                    state: EdgeKind::Door,
+                    exterior: false,
+                },
+                PortalIntent {
+                    from_room: 1,
+                    to_room: NO_ROOM,
+                    from_cell: Cell::new(0, 5, 2),
+                    to_cell: Cell::new(0, 6, 2),
+                    state: EdgeKind::Door,
+                    exterior: true,
+                },
+            ],
+            verticals: vec![],
+        },
+        zone_of_room: BTreeMap::from([(1, "entry".into()), (2, "spine".into())]),
+        entry_room: 1,
+        goal_room: 2,
+        critical_path: vec![1, 2],
+        room_links: vec![(1, 2)],
+    };
+    (placed, masks)
+}
+
+#[test]
+fn stamp_airlock_2x2_translates_and_keeps_overrides() {
+    let golden = airlock_2x2();
+    let (mut placed, masks) = west_airlock_placed();
+    let applied = apply_golden_stamps(&mut placed, &[&golden], &masks).unwrap();
+    let airlock = placed.topology.rooms.iter().find(|r| r.id == 1).unwrap();
+    assert_eq!(airlock.cells.len(), 4);
+    assert!(applied.overrides.floors.values().any(|m| m == "floor_1x1"));
+    assert_eq!(applied.props.len(), 1);
+    assert!(applied.skip_furnish.contains(&(0, 4, 3)));
+    assert!(applied.skip_loot.contains(&(0, 4, 3)));
+
+    let (plan, _stale) =
+        compile_authored(&placed.topology, &DefaultModulePicker, &applied.overrides);
+    assert!(plan.errors.is_empty(), "{:?}", plan.errors);
+    let attach = Cell::new(0, 4, 2);
+    assert_eq!(
+        plan.occupancy
+            .get(&attach.key())
+            .map(|r| r.module_id.as_str()),
+        Some("floor_1x1"),
+        "compile_authored must keep stamped floor override"
+    );
+}
+
+#[test]
+fn stamp_skips_incompatible_roles() {
+    let mut golden = airlock_2x2();
+    golden.stamp.as_mut().unwrap().compatible_roles = vec!["bridge".into()];
+    let (mut placed, masks) = west_airlock_placed();
+    let applied = apply_golden_stamps(&mut placed, &[&golden], &masks).unwrap();
+    assert!(applied.overrides.floors.is_empty());
+    assert!(applied.props.is_empty());
 }

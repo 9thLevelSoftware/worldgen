@@ -99,6 +99,16 @@ impl Dir {
         }
     }
 
+    pub fn parse(s: &str) -> Option<Dir> {
+        match s {
+            "north" => Some(Dir::North),
+            "south" => Some(Dir::South),
+            "east" => Some(Dir::East),
+            "west" => Some(Dir::West),
+            _ => None,
+        }
+    }
+
     /// Direction from `a` to a cardinal neighbor `b` on the same deck.
     pub fn between(a: Cell, b: Cell) -> Option<Dir> {
         if a.deck != b.deck {

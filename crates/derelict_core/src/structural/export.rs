@@ -339,9 +339,9 @@ pub fn to_layout_json_named(
         "landmarks": [],
         "encounters": [],
         "blocked_links": [],
-        "fire_zones": [],
-        "arc_zones": [],
-        "breach_zones": [],
+        "fire_zones": link_zones_json(&ship.hazard_overlay.fire_zones),
+        "arc_zones": link_zones_json(&ship.hazard_overlay.arc_zones),
+        "breach_zones": link_zones_json(&ship.hazard_overlay.breach_zones),
         "structural_plan": structural_plan,
     })
 }
@@ -414,7 +414,7 @@ pub fn to_gameplay_slice_json_named(ship: &Ship, names: &BTreeMap<RoomId, String
         "start_room": name_of(ship.entry_room),
         "goal_room": name_of(ship.goal_room),
         "critical_path": critical_path,
-        "fire_zones": [],
+        "fire_zones": link_zones_json(&ship.hazard_overlay.fire_zones),
         "objectives": objectives,
         "loot_containers": loot_containers,
         "summary": format!(
@@ -503,6 +503,7 @@ pub fn layout_from_golden(golden: &GoldenArea) -> Result<PlayableExport, String>
         damage_events: Vec::new(),
         fractured: false,
         fragments: Vec::new(),
+        hazard_overlay: Default::default(),
     };
 
     let names = golden.room_stable_ids();

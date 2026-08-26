@@ -136,11 +136,13 @@ fn door_pos_rotation(cell: Cell, direction: Dir) -> (GridPos, u8) {
 
 /// Create door entities (from portal edges), roll locks (written back into
 /// the plan as `Locked` edge kinds), and place furniture per room rules.
+/// `skip_cells` are occupancy cells that already hold an AuthoredProp.
 pub fn furnish(
     master_seed: u64,
     topology: &Topology,
     plan: &mut StructuralPlan,
     rules: &FurnishingRules,
+    skip_cells: &BTreeSet<(u8, i32, i32)>,
 ) -> FurnishOutcome {
     let role_of: BTreeMap<RoomId, Role> = topology.rooms.iter().map(|r| (r.id, r.role)).collect();
     let mut entities: Vec<EntitySpec> = Vec::new();
@@ -224,6 +226,7 @@ pub fn furnish(
         .iter()
         .map(|e| (e.pos.deck, e.pos.x, e.pos.y))
         .collect();
+    occupied.extend(skip_cells.iter().copied());
     for room in &topology.rooms {
         let Some(rule_list) = rules.rules.get(&room.role) else {
             continue;

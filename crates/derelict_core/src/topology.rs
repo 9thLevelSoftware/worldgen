@@ -9,9 +9,14 @@
 //! connection failure is a typed error feeding the pipeline's bounded
 //! retry — never a best-effort layout.
 
+use crate::authoring::{
+    compile_authored, AuthoredHazards, AuthoredProp, GoldenArea, InventoryMode, LinkZone,
+    ModuleOverrides,
+};
 use crate::rng::{roll_range, weighted_choice};
 use crate::role::Role;
 use crate::stages::hull::Mask;
+use crate::structural::compile::DefaultModulePicker;
 use crate::structural::plan::{
     Cell, Dir, EdgeKind, PortalIntent, RoomId, RoomSpec, Topology, VerticalConnection, NO_ROOM,
 };
@@ -1481,4 +1486,724 @@ fn bfs_room_path(start: RoomId, goal: RoomId, links: &[(RoomId, RoomId)]) -> Opt
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// Golden-area occupancy stamps
+// ---------------------------------------------------------------------------
+
+/// Occupancy-stamp result: translated overrides, props, and overlay zones.
+#[derive(Clone, Debug, Default)]
+pub struct StampApplication {
+    pub overrides: ModuleOverrides,
+    pub props: Vec<AuthoredProp>,
+    pub skip_furnish: BTreeSet<(u8, i32, i32)>,
+    pub skip_loot: BTreeSet<(u8, i32, i32)>,
+    pub hazards: AuthoredHazards,
+}
+
+/// Stamp opted-in goldens into a placed topology. Role mismatch skips a
+/// golden. Overlap / compile failure of one stamp+offset is `TopoError` for
+/// that offset only — the caller must not blacklist the template pool.
+pub fn apply_golden_stamps(
+    placed: &mut PlacedTopology,
+    goldens: &[&GoldenArea],
+    masks: &[Mask],
+) -> Result<StampApplication, TopoError> {
+    let mut applied = StampApplication {
+        hazards: AuthoredHazards {
+            source: "runtime".into(),
+            ..AuthoredHazards::default()
+        },
+        ..StampApplication::default()
+    };
+    for golden in goldens {
+        match stamp_one(placed, golden, masks, &applied.overrides)? {
+            None => {}
+            Some(one) => {
+                merge_overrides(&mut applied.overrides, one.overrides);
+                for prop in &one.props {
+                    let key = (prop_deck(prop), prop.cell[0], prop.cell[1]);
+                    applied.skip_furnish.insert(key);
+                    match prop.inventory_mode {
+                        InventoryMode::Explicit | InventoryMode::LootTable => {
+                            applied.skip_loot.insert(key);
+                        }
+                        InventoryMode::Empty => {}
+                    }
+                }
+                applied.props.extend(one.props);
+                applied.hazards.fire_zones.extend(one.hazards.fire_zones);
+                applied.hazards.arc_zones.extend(one.hazards.arc_zones);
+                applied
+                    .hazards
+                    .breach_zones
+                    .extend(one.hazards.breach_zones);
+                applied
+                    .hazards
+                    .radiation_zones
+                    .extend(one.hazards.radiation_zones);
+            }
+        }
+    }
+    Ok(applied)
+}
+
+fn prop_deck(prop: &AuthoredProp) -> u8 {
+    u8::try_from(prop.cell[2]).unwrap_or(0)
+}
+
+fn merge_overrides(into: &mut ModuleOverrides, from: ModuleOverrides) {
+    into.floors.extend(from.floors);
+    into.ceilings.extend(from.ceilings);
+    into.edges.extend(from.edges);
+}
+
+fn stamp_one(
+    placed: &mut PlacedTopology,
+    golden: &GoldenArea,
+    masks: &[Mask],
+    prior_overrides: &ModuleOverrides,
+) -> Result<Option<StampApplication>, TopoError> {
+    let Some(meta) = golden.stamp.as_ref() else {
+        return Ok(None);
+    };
+    if meta.attach_edges.is_empty() {
+        return Ok(None);
+    }
+    let compatible: BTreeSet<Role> = meta
+        .compatible_roles
+        .iter()
+        .filter_map(|s| Role::parse(s))
+        .collect();
+    if compatible.is_empty() {
+        return Ok(None);
+    }
+    let attach = &meta.attach_edges[0];
+    let Some(attach_dir) = Dir::parse(&attach.dir) else {
+        return Err(TopoError::ZonePlacementFailed {
+            zone: golden.id.clone(),
+            detail: format!("unknown attach dir '{}'", attach.dir),
+        });
+    };
+    let attach_cell = cell_from_xyz(attach.cell).map_err(|d| TopoError::ZonePlacementFailed {
+        zone: golden.id.clone(),
+        detail: d,
+    })?;
+
+    let candidates: Vec<(RoomId, usize, Cell)> = placed
+        .topology
+        .rooms
+        .iter()
+        .filter(|r| compatible.contains(&r.role))
+        .flat_map(|r| {
+            placed
+                .topology
+                .portals
+                .iter()
+                .enumerate()
+                .filter_map(move |(pi, p)| {
+                    let (cell, dir) = portal_connection(p, r.id)?;
+                    if dir == attach_dir {
+                        Some((r.id, pi, cell))
+                    } else {
+                        None
+                    }
+                })
+        })
+        .collect();
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+
+    let mut last_detail = String::from("no viable stamp offset");
+    for (target_id, portal_idx, conn) in candidates {
+        let dx = conn.x - attach_cell.x;
+        let dy = conn.y - attach_cell.y;
+        let dd = i32::from(conn.deck) - i32::from(attach_cell.deck);
+        match try_stamp_offset(
+            placed,
+            golden,
+            masks,
+            target_id,
+            portal_idx,
+            attach_cell,
+            attach_dir,
+            dd,
+            dx,
+            dy,
+            prior_overrides,
+        ) {
+            Ok(app) => return Ok(Some(app)),
+            Err(detail) => last_detail = detail,
+        }
+    }
+    Err(TopoError::ZonePlacementFailed {
+        zone: golden.id.clone(),
+        detail: last_detail,
+    })
+}
+
+fn portal_connection(portal: &PortalIntent, room_id: RoomId) -> Option<(Cell, Dir)> {
+    if portal.from_room == room_id {
+        let dir = Dir::between(portal.from_cell, portal.to_cell)?;
+        Some((portal.from_cell, dir))
+    } else if portal.to_room == room_id {
+        let dir = Dir::between(portal.to_cell, portal.from_cell)?;
+        Some((portal.to_cell, dir))
+    } else {
+        None
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_stamp_offset(
+    placed: &mut PlacedTopology,
+    golden: &GoldenArea,
+    masks: &[Mask],
+    target_id: RoomId,
+    portal_idx: usize,
+    attach_cell: Cell,
+    attach_dir: Dir,
+    dd: i32,
+    dx: i32,
+    dy: i32,
+    prior_overrides: &ModuleOverrides,
+) -> Result<StampApplication, String> {
+    let golden_topo = golden.to_topology()?;
+    let golden_attach_room = golden_topo
+        .rooms
+        .iter()
+        .find(|r| r.cells.contains(&attach_cell))
+        .ok_or_else(|| "attach cell is not in golden occupancy".to_string())?;
+
+    let snapshot = placed.clone();
+    let result = apply_offset(
+        placed,
+        golden,
+        &golden_topo,
+        golden_attach_room.id,
+        target_id,
+        portal_idx,
+        attach_cell,
+        attach_dir,
+        dd,
+        dx,
+        dy,
+        masks,
+        prior_overrides,
+    );
+    match result {
+        Ok(app) => Ok(app),
+        Err(e) => {
+            *placed = snapshot;
+            Err(e)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_offset(
+    placed: &mut PlacedTopology,
+    golden: &GoldenArea,
+    golden_topo: &Topology,
+    golden_attach_id: RoomId,
+    target_id: RoomId,
+    portal_idx: usize,
+    attach_cell: Cell,
+    attach_dir: Dir,
+    dd: i32,
+    dx: i32,
+    dy: i32,
+    masks: &[Mask],
+    prior_overrides: &ModuleOverrides,
+) -> Result<StampApplication, String> {
+    let mut next_id = placed
+        .topology
+        .rooms
+        .iter()
+        .map(|r| r.id)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let mut id_map: BTreeMap<RoomId, RoomId> = BTreeMap::new();
+    id_map.insert(golden_attach_id, target_id);
+    for room in &golden_topo.rooms {
+        if room.id == golden_attach_id {
+            continue;
+        }
+        id_map.insert(room.id, next_id);
+        next_id += 1;
+    }
+
+    let mut new_cells: BTreeMap<RoomId, Vec<Cell>> = BTreeMap::new();
+    for room in &golden_topo.rooms {
+        let mapped = id_map[&room.id];
+        let mut cells = Vec::with_capacity(room.cells.len());
+        for &c in &room.cells {
+            cells.push(translate_cell(c, dd, dx, dy)?);
+        }
+        new_cells.insert(mapped, cells);
+    }
+
+    let mut occupied: BTreeMap<(u8, i32, i32), RoomId> = BTreeMap::new();
+    for room in &placed.topology.rooms {
+        if room.id == target_id {
+            continue;
+        }
+        for c in &room.cells {
+            occupied.insert((c.deck, c.x, c.y), room.id);
+        }
+    }
+    for (rid, cells) in &new_cells {
+        for c in cells {
+            if !in_hull(masks, *c) {
+                return Err(format!("stamp cell {} is outside the hull", c.key()));
+            }
+            if let Some(prev) = occupied.insert((c.deck, c.x, c.y), *rid) {
+                if prev != *rid {
+                    return Err(format!(
+                        "stamp overlap at {} (room {prev} vs {rid})",
+                        c.key()
+                    ));
+                }
+            }
+        }
+    }
+
+    if !placed.topology.rooms.iter().any(|r| r.id == target_id) {
+        return Err(format!("missing target room {target_id}"));
+    }
+    let target_deck = new_cells[&target_id].first().map(|c| c.deck).unwrap_or(0);
+
+    if let Some(room) = placed.topology.rooms.iter_mut().find(|r| r.id == target_id) {
+        room.cells = new_cells[&target_id].clone();
+        room.deck = target_deck;
+    }
+    for room in &golden_topo.rooms {
+        if room.id == golden_attach_id {
+            continue;
+        }
+        let mapped = id_map[&room.id];
+        let cells = new_cells[&mapped].clone();
+        let deck = cells.first().map(|c| c.deck).unwrap_or(room.deck);
+        placed.topology.rooms.push(RoomSpec {
+            id: mapped,
+            role: room.role,
+            deck,
+            cells,
+        });
+        placed
+            .zone_of_room
+            .insert(mapped, format!("stamp:{}", golden.id));
+    }
+
+    let generated = placed.topology.portals[portal_idx].clone();
+    let (neighbor, exterior) = if generated.from_room == target_id {
+        (generated.to_room, generated.exterior)
+    } else {
+        (generated.from_room, generated.exterior)
+    };
+    let attach_translated = translate_cell(attach_cell, dd, dx, dy)?;
+    let attach_to = attach_translated.neighbor(attach_dir);
+    let attach_state = golden_topo
+        .portals
+        .iter()
+        .find(|p| is_attach_portal(p, attach_cell, attach_dir))
+        .map(|p| p.state)
+        .unwrap_or(generated.state);
+
+    placed.topology.portals.remove(portal_idx);
+    placed.topology.portals.push(PortalIntent {
+        from_room: target_id,
+        to_room: neighbor,
+        from_cell: attach_translated,
+        to_cell: attach_to,
+        state: attach_state,
+        exterior: exterior || neighbor == NO_ROOM,
+    });
+
+    // Drop portals whose endpoints no longer belong to the declared rooms.
+    let owner = occupancy_index(&placed.topology);
+    placed
+        .topology
+        .portals
+        .retain(|p| portal_still_valid(p, &owner));
+    placed
+        .topology
+        .verticals
+        .retain(|v| vertical_still_valid(v, &owner));
+
+    for p in &golden_topo.portals {
+        if is_attach_portal(p, attach_cell, attach_dir) {
+            continue;
+        }
+        let from_room = *id_map.get(&p.from_room).unwrap_or(&p.from_room);
+        let to_room = if p.to_room == NO_ROOM {
+            NO_ROOM
+        } else {
+            *id_map.get(&p.to_room).unwrap_or(&p.to_room)
+        };
+        placed.topology.portals.push(PortalIntent {
+            from_room,
+            to_room,
+            from_cell: translate_cell(p.from_cell, dd, dx, dy)?,
+            to_cell: translate_cell(p.to_cell, dd, dx, dy)?,
+            state: p.state,
+            exterior: p.exterior || to_room == NO_ROOM,
+        });
+    }
+    for v in &golden_topo.verticals {
+        placed.topology.verticals.push(VerticalConnection {
+            from_room: *id_map.get(&v.from_room).unwrap_or(&v.from_room),
+            to_room: *id_map.get(&v.to_room).unwrap_or(&v.to_room),
+            from_cell: translate_cell(v.from_cell, dd, dx, dy)?,
+            to_cell: translate_cell(v.to_cell, dd, dx, dy)?,
+        });
+    }
+
+    restore_neighbor_links(placed, target_id)?;
+    ensure_entry_exterior(placed, masks);
+
+    let mut links: Vec<(RoomId, RoomId)> = Vec::new();
+    for p in &placed.topology.portals {
+        if !p.exterior && p.to_room != NO_ROOM {
+            links.push((p.from_room, p.to_room));
+        }
+    }
+    for v in &placed.topology.verticals {
+        links.push((v.from_room, v.to_room));
+    }
+    links.sort();
+    links.dedup();
+    placed.room_links = links;
+    if let Some(path) = bfs_room_path(placed.entry_room, placed.goal_room, &placed.room_links) {
+        placed.critical_path = path;
+    } else {
+        return Err("stamp broke entry→goal path".into());
+    }
+
+    let overrides = translate_overrides(&golden.module_overrides, dd, dx, dy)?;
+    let mut combined = prior_overrides.clone();
+    merge_overrides(&mut combined, overrides.clone());
+    let (plan, _stale) = compile_authored(&placed.topology, &DefaultModulePicker, &combined);
+    if !plan.errors.is_empty() {
+        return Err(format!("stamp compile: {}", plan.errors.join("; ")));
+    }
+
+    let props: Vec<AuthoredProp> = golden
+        .props
+        .iter()
+        .map(|p| translate_prop(p, dd, dx, dy))
+        .collect::<Result<_, _>>()?;
+    let hazards = translate_hazards(golden, &id_map, &placed.topology, dd, dx, dy)?;
+
+    Ok(StampApplication {
+        overrides,
+        props,
+        skip_furnish: BTreeSet::new(),
+        skip_loot: BTreeSet::new(),
+        hazards,
+    })
+}
+
+fn occupancy_index(topology: &Topology) -> BTreeMap<(u8, i32, i32), RoomId> {
+    let mut owner = BTreeMap::new();
+    for room in &topology.rooms {
+        for c in &room.cells {
+            owner.insert((c.deck, c.x, c.y), room.id);
+        }
+    }
+    owner
+}
+
+fn portal_still_valid(p: &PortalIntent, owner: &BTreeMap<(u8, i32, i32), RoomId>) -> bool {
+    let from_ok =
+        owner.get(&(p.from_cell.deck, p.from_cell.x, p.from_cell.y)) == Some(&p.from_room);
+    if !from_ok {
+        return false;
+    }
+    if p.exterior || p.to_room == NO_ROOM {
+        !owner.contains_key(&(p.to_cell.deck, p.to_cell.x, p.to_cell.y))
+    } else {
+        owner.get(&(p.to_cell.deck, p.to_cell.x, p.to_cell.y)) == Some(&p.to_room)
+    }
+}
+
+fn vertical_still_valid(v: &VerticalConnection, owner: &BTreeMap<(u8, i32, i32), RoomId>) -> bool {
+    owner.get(&(v.from_cell.deck, v.from_cell.x, v.from_cell.y)) == Some(&v.from_room)
+        && owner.get(&(v.to_cell.deck, v.to_cell.x, v.to_cell.y)) == Some(&v.to_room)
+}
+
+fn restore_neighbor_links(placed: &mut PlacedTopology, target_id: RoomId) -> Result<(), String> {
+    let mut cells_of: BTreeMap<RoomId, Vec<(i32, i32)>> = BTreeMap::new();
+    let mut deck_of: BTreeMap<RoomId, u8> = BTreeMap::new();
+    for room in &placed.topology.rooms {
+        deck_of.insert(room.id, room.deck);
+        cells_of.insert(room.id, room.cells.iter().map(|c| (c.x, c.y)).collect());
+    }
+    let mut linked: BTreeSet<(RoomId, RoomId)> = BTreeSet::new();
+    for p in &placed.topology.portals {
+        if !p.exterior && p.to_room != NO_ROOM {
+            linked.insert(ordered(p.from_room, p.to_room));
+        }
+    }
+    for v in &placed.topology.verticals {
+        linked.insert(ordered(v.from_room, v.to_room));
+    }
+    let wanted: Vec<(RoomId, RoomId)> = placed
+        .room_links
+        .iter()
+        .copied()
+        .filter(|(a, b)| *a == target_id || *b == target_id)
+        .collect();
+    for (a, b) in wanted {
+        let key = ordered(a, b);
+        if linked.contains(&key) {
+            continue;
+        }
+        let (da, db) = (
+            *deck_of.get(&a).unwrap_or(&0),
+            *deck_of.get(&b).unwrap_or(&0),
+        );
+        if da != db {
+            continue;
+        }
+        let Some((ca, cb)) = shared_boundary(
+            cells_of.get(&a).map(Vec::as_slice).unwrap_or(&[]),
+            cells_of.get(&b).map(Vec::as_slice).unwrap_or(&[]),
+        ) else {
+            return Err(format!("stamp lost connection {a} -> {b}"));
+        };
+        placed.topology.portals.push(PortalIntent {
+            from_room: a,
+            to_room: b,
+            from_cell: Cell::new(da, ca.0, ca.1),
+            to_cell: Cell::new(da, cb.0, cb.1),
+            state: EdgeKind::Door,
+            exterior: false,
+        });
+        linked.insert(key);
+    }
+    Ok(())
+}
+
+fn ordered(a: RoomId, b: RoomId) -> (RoomId, RoomId) {
+    if a < b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+fn ensure_entry_exterior(placed: &mut PlacedTopology, masks: &[Mask]) {
+    let entry = placed.entry_room;
+    let has_ext = placed.topology.portals.iter().any(|p| {
+        (p.from_room == entry || p.to_room == entry) && (p.exterior || p.to_room == NO_ROOM)
+    });
+    if has_ext {
+        return;
+    }
+    let Some(room) = placed.topology.rooms.iter().find(|r| r.id == entry) else {
+        return;
+    };
+    let Some(mask) = masks.get(room.deck as usize) else {
+        return;
+    };
+    let mut candidates: Vec<(Cell, Dir)> = Vec::new();
+    for &c in &room.cells {
+        for dir in Dir::ALL {
+            let n = c.neighbor(dir);
+            if !mask.get(n.x, n.y) {
+                candidates.push((c, dir));
+            }
+        }
+    }
+    candidates.sort_by_key(|(c, d)| (c.y, c.x, d.yaw_degrees()));
+    if let Some((cell, dir)) = candidates.get(candidates.len() / 2).copied() {
+        placed.topology.portals.push(PortalIntent {
+            from_room: entry,
+            to_room: NO_ROOM,
+            from_cell: cell,
+            to_cell: cell.neighbor(dir),
+            state: EdgeKind::Door,
+            exterior: true,
+        });
+    }
+}
+
+fn is_attach_portal(p: &PortalIntent, attach_cell: Cell, attach_dir: Dir) -> bool {
+    if p.from_cell == attach_cell {
+        Dir::between(p.from_cell, p.to_cell) == Some(attach_dir)
+    } else if p.to_cell == attach_cell {
+        Dir::between(p.to_cell, p.from_cell) == Some(attach_dir)
+    } else {
+        false
+    }
+}
+
+fn in_hull(masks: &[Mask], cell: Cell) -> bool {
+    masks
+        .get(cell.deck as usize)
+        .map(|m| m.get(cell.x, cell.y))
+        .unwrap_or(false)
+}
+
+fn cell_from_xyz(xyz: [i32; 3]) -> Result<Cell, String> {
+    let [x, y, deck] = xyz;
+    let deck = u8::try_from(deck).map_err(|_| format!("deck {deck} out of range"))?;
+    Ok(Cell::new(deck, x, y))
+}
+
+fn translate_cell(cell: Cell, dd: i32, dx: i32, dy: i32) -> Result<Cell, String> {
+    let deck = i32::from(cell.deck) + dd;
+    let deck = u8::try_from(deck).map_err(|_| format!("translated deck {deck} out of range"))?;
+    Ok(Cell::new(deck, cell.x + dx, cell.y + dy))
+}
+
+fn translate_xyz(cell: [i32; 3], dd: i32, dx: i32, dy: i32) -> Result<[i32; 3], String> {
+    let c = translate_cell(cell_from_xyz(cell)?, dd, dx, dy)?;
+    Ok([c.x, c.y, i32::from(c.deck)])
+}
+
+fn translate_prop(prop: &AuthoredProp, dd: i32, dx: i32, dy: i32) -> Result<AuthoredProp, String> {
+    let mut out = prop.clone();
+    out.cell = translate_xyz(prop.cell, dd, dx, dy)?;
+    Ok(out)
+}
+
+fn translate_overrides(
+    ov: &ModuleOverrides,
+    dd: i32,
+    dx: i32,
+    dy: i32,
+) -> Result<ModuleOverrides, String> {
+    let mut out = ModuleOverrides::default();
+    for (k, v) in &ov.floors {
+        out.floors
+            .insert(translate_cell_key(k, dd, dx, dy)?, v.clone());
+    }
+    for (k, v) in &ov.ceilings {
+        out.ceilings
+            .insert(translate_cell_key(k, dd, dx, dy)?, v.clone());
+    }
+    for (k, v) in &ov.edges {
+        out.edges
+            .insert(translate_edge_key(k, dd, dx, dy)?, v.clone());
+    }
+    Ok(out)
+}
+
+fn translate_cell_key(key: &str, dd: i32, dx: i32, dy: i32) -> Result<String, String> {
+    let mut parts = key.split('|');
+    let deck: i32 = parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| format!("bad cell key '{key}'"))?;
+    let x: i32 = parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| format!("bad cell key '{key}'"))?;
+    let y: i32 = parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| format!("bad cell key '{key}'"))?;
+    translate_cell(Cell::new(u8::try_from(deck).unwrap_or(0), x, y), dd, dx, dy).map(|c| c.key())
+}
+
+fn translate_edge_key(key: &str, dd: i32, dx: i32, dy: i32) -> Result<String, String> {
+    let parts: Vec<&str> = key.split('|').collect();
+    if parts.len() != 4 {
+        return Err(format!("bad edge key '{key}'"));
+    }
+    let deck: i32 = parts[0]
+        .parse()
+        .map_err(|_| format!("bad edge key '{key}'"))?;
+    let deck = u8::try_from(deck + dd).map_err(|_| "translated deck out of range".to_string())?;
+    match parts[1] {
+        "h" => {
+            let min_y: i32 = parts[2]
+                .parse()
+                .map_err(|_| format!("bad edge key '{key}'"))?;
+            let x: i32 = parts[3]
+                .parse()
+                .map_err(|_| format!("bad edge key '{key}'"))?;
+            Ok(format!("{}|h|{}|{}", deck, min_y + dy, x + dx))
+        }
+        "v" => {
+            let y: i32 = parts[2]
+                .parse()
+                .map_err(|_| format!("bad edge key '{key}'"))?;
+            let min_x: i32 = parts[3]
+                .parse()
+                .map_err(|_| format!("bad edge key '{key}'"))?;
+            Ok(format!("{}|v|{}|{}", deck, y + dy, min_x + dx))
+        }
+        _ => Err(format!("bad edge key '{key}'")),
+    }
+}
+
+fn translate_hazards(
+    golden: &GoldenArea,
+    id_map: &BTreeMap<RoomId, RoomId>,
+    topology: &Topology,
+    dd: i32,
+    dx: i32,
+    dy: i32,
+) -> Result<AuthoredHazards, String> {
+    let remap = |sid: &str| -> String {
+        if sid.is_empty() {
+            return String::new();
+        }
+        let Some(gid) = golden.topology.rooms.iter().find(|r| r.stable_id == sid) else {
+            return sid.to_string();
+        };
+        let Some(&rid) = id_map.get(&gid.id) else {
+            return sid.to_string();
+        };
+        match topology.rooms.iter().find(|r| r.id == rid) {
+            Some(room) => format!("{}_{:02}", room.role.name(), room.id),
+            None => sid.to_string(),
+        }
+    };
+    let map_zone = |z: &LinkZone| -> Result<LinkZone, String> {
+        Ok(LinkZone {
+            id: z.id.clone(),
+            from_room: remap(&z.from_room),
+            to_room: remap(&z.to_room),
+            from_cell: translate_xyz(z.from_cell, dd, dx, dy)?,
+            to_cell: translate_xyz(z.to_cell, dd, dx, dy)?,
+            module_id: z.module_id.clone(),
+            kind: z.kind.clone(),
+            compartment_id: z.compartment_id.clone(),
+            rationale: z.rationale.clone(),
+        })
+    };
+    Ok(AuthoredHazards {
+        source: "runtime".into(),
+        fire_zones: golden
+            .hazards
+            .fire_zones
+            .iter()
+            .map(map_zone)
+            .collect::<Result<_, _>>()?,
+        breach_zones: golden
+            .hazards
+            .breach_zones
+            .iter()
+            .map(map_zone)
+            .collect::<Result<_, _>>()?,
+        arc_zones: golden
+            .hazards
+            .arc_zones
+            .iter()
+            .map(map_zone)
+            .collect::<Result<_, _>>()?,
+        radiation_zones: golden
+            .hazards
+            .radiation_zones
+            .iter()
+            .map(map_zone)
+            .collect::<Result<_, _>>()?,
+    })
 }
