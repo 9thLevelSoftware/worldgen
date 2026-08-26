@@ -1,8 +1,9 @@
 class_name BuilderApp
 extends Control
 ## Standalone occupancy author. Owns the GoldenArea dict and live-compiles
-## through DerelictAuthor on a 50 ms debounce. CSG floors only.
+## through DerelictAuthor on a 50 ms debounce. CSG floors plus authored portals.
 
+const _LATTICE := preload("res://scripts/OccupancyLattice.gd")
 const COMPILE_DEBOUNCE_S := 0.05
 
 var author
@@ -19,6 +20,8 @@ var _compile_timer: Timer
 @onready var _phase_bar: TabBar = %PhaseBar
 @onready var _deck_label: Label = %DeckLabel
 @onready var _iso_btn: Button = %IsoBtn
+@onready var _tool_list: VBoxContainer = %ToolList
+@onready var _state_list: VBoxContainer = %StateList
 @onready var _role_list: VBoxContainer = %RoleList
 @onready var _room_list: ItemList = %RoomList
 @onready var _view: SubViewportContainer = %View
@@ -33,6 +36,7 @@ var _compile_timer: Timer
 
 func _ready() -> void:
 	_build_phases()
+	_build_tools()
 	_build_roles()
 	_wire()
 	golden = _empty_golden()
@@ -41,7 +45,7 @@ func _ready() -> void:
 	_resolve_content()
 	_schedule_compile()
 	_sync_deck_label()
-	_status.text = "LMB paint · RMB erase · click other room stamps role · room list inspects · Q/E [ ] deck · MMB pan/orbit · wheel zoom"
+	_status.text = "Paint LMB · RMB erase · Portal: click A then neighbor · Vertical: stacked N/N±1 · Del removes selected portal/vertical · Esc cancels pending · Q/E deck"
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -52,6 +56,12 @@ func _unhandled_input(event: InputEvent) -> void:
 	if _lattice.is_painting():
 		return
 	match event.keycode:
+		KEY_ESCAPE:
+			_lattice.cancel_pending()
+			get_viewport().set_input_as_handled()
+		KEY_DELETE, KEY_BACKSPACE:
+			if _lattice.remove_selected_link():
+				get_viewport().set_input_as_handled()
 		KEY_Q, KEY_BRACKETLEFT:
 			_lattice.nudge_deck(-1)
 			get_viewport().set_input_as_handled()
@@ -70,9 +80,15 @@ func _wire() -> void:
 	_view.mouse_exited.connect(_on_view_pointer_cancelled)
 	_lattice.occupancy_changed.connect(_on_occupancy_changed)
 	_lattice.room_selected.connect(_on_room_selected)
+	_lattice.portal_selected.connect(_on_portal_selected)
+	_lattice.vertical_selected.connect(_on_vertical_selected)
+	_lattice.tool_changed.connect(func(_t: String) -> void: _highlight_armed_tool())
 	_lattice.deck_changed.connect(func(_d: int) -> void: _sync_deck_label())
 	_lattice.hover_info.connect(func(t: String) -> void: _status.text = t)
 	_inspector.room_edited.connect(_on_room_edited)
+	_inspector.portal_edited.connect(_on_portal_edited)
+	_inspector.portal_removed.connect(func() -> void: _lattice.remove_selected_portal())
+	_inspector.vertical_removed.connect(func() -> void: _lattice.remove_selected_vertical())
 	_room_list.item_selected.connect(_on_room_list_selected)
 	_compile_timer = Timer.new()
 	_compile_timer.one_shot = true
@@ -92,8 +108,64 @@ func _build_phases() -> void:
 	_phase_bar.current_tab = 0
 
 
+func _build_tools() -> void:
+	var tools := [
+		["Paint occupancy", _LATTICE.TOOL_PAINT],
+		["Portal / exit", _LATTICE.TOOL_PORTAL],
+		["Vertical opening", _LATTICE.TOOL_VERTICAL],
+	]
+	for spec in tools:
+		var b := Button.new()
+		b.text = str(spec[0])
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		b.pressed.connect(_on_tool_pressed.bind(str(spec[1])))
+		_tool_list.add_child(b)
+	for state in _LATTICE.PORTAL_STATES:
+		var sb := Button.new()
+		sb.text = state
+		sb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		sb.pressed.connect(_on_portal_state_pressed.bind(state))
+		_state_list.add_child(sb)
+	_highlight_armed_tool()
+	_highlight_armed_state()
+
+
+func _on_tool_pressed(tool: String) -> void:
+	_lattice.set_tool(tool)
+	_highlight_armed_tool()
+
+
+func _on_portal_state_pressed(state: String) -> void:
+	_lattice.stamp_portal_state(state)
+	_highlight_armed_state()
+
+
+func _highlight_armed_tool() -> void:
+	var armed := str(_lattice.active_tool)
+	var labels := {
+		_LATTICE.TOOL_PAINT: "Paint occupancy",
+		_LATTICE.TOOL_PORTAL: "Portal / exit",
+		_LATTICE.TOOL_VERTICAL: "Vertical opening",
+	}
+	var want := str(labels.get(armed, "Paint occupancy"))
+	for child in _tool_list.get_children():
+		var b := child as Button
+		if b == null:
+			continue
+		b.modulate = Color(1.15, 1.1, 0.65) if b.text == want else Color.WHITE
+
+
+func _highlight_armed_state() -> void:
+	var armed := str(_lattice.active_portal_state)
+	for child in _state_list.get_children():
+		var b := child as Button
+		if b == null:
+			continue
+		b.modulate = Color(1.15, 1.1, 0.65) if b.text == armed else Color.WHITE
+
+
 func _build_roles() -> void:
-	for role in OccupancyLattice.ROLES:
+	for role in _LATTICE.ROLES:
 		var b := Button.new()
 		b.text = role
 		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -157,6 +229,36 @@ func _on_room_selected(room: Dictionary) -> void:
 		if int(_room_list.get_item_metadata(i)) == id:
 			_room_list.select(i)
 			break
+
+
+func _on_portal_selected(portal: Dictionary) -> void:
+	if portal.is_empty():
+		_inspector.clear()
+		return
+	_inspector.bind_portal(portal)
+	_highlight_armed_state()
+	var id := int(portal.get("from_room", 0))
+	for i in _room_list.item_count:
+		if int(_room_list.get_item_metadata(i)) == id:
+			_room_list.select(i)
+			break
+
+
+func _on_vertical_selected(vertical: Dictionary) -> void:
+	if vertical.is_empty():
+		_inspector.clear()
+		return
+	_inspector.bind_vertical(vertical)
+	var id := int(vertical.get("from_room", 0))
+	for i in _room_list.item_count:
+		if int(_room_list.get_item_metadata(i)) == id:
+			_room_list.select(i)
+			break
+
+
+func _on_portal_edited(portal: Dictionary) -> void:
+	_lattice.apply_portal_edit(portal)
+	_highlight_armed_state()
 
 
 func _on_room_edited(room: Dictionary, vars: Dictionary) -> void:
@@ -331,6 +433,10 @@ func _golden_from_lattice() -> Dictionary:
 	g["scope"] = scope
 	g["entry_room"] = _entry_room
 	g["goal_room"] = _goal_room
-	g["topology"] = {"rooms": rooms, "portals": [], "verticals": []}
+	g["topology"] = {
+		"rooms": rooms,
+		"portals": _lattice.get_portals(),
+		"verticals": _lattice.get_verticals(),
+	}
 	g["room_vars"] = _room_vars.duplicate(true)
 	return g
