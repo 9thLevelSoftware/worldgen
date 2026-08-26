@@ -451,13 +451,12 @@ pub fn layout_from_golden(golden: &GoldenArea) -> Result<PlayableExport, String>
         return Err(format!("unresolved goal_room '{goal_sid}'"));
     }
 
-    let critical_path = match golden.scope {
-        GoldenScope::Derelict => {
-            derelict_bfs(&topology, entry_room, goal_room).ok_or_else(|| {
-                format!("CriticalPathBroken: no BFS path from '{entry_sid}' to '{goal_sid}'")
-            })?
-        }
-        GoldenScope::Room | GoldenScope::Area => vec![entry_room],
+    let critical_path = if golden.scope == GoldenScope::Room || entry_room == goal_room {
+        vec![entry_room]
+    } else {
+        derelict_bfs(&topology, entry_room, goal_room).ok_or_else(|| {
+            format!("CriticalPathBroken: no BFS path from '{entry_sid}' to '{goal_sid}'")
+        })?
     };
     let policy = match golden.scope {
         GoldenScope::Room | GoldenScope::Area => ValidationPolicy::pre_damage(Vec::new()),
@@ -609,6 +608,10 @@ fn overlay_authored(
             "breach_zones".into(),
             link_zones_json(&golden.hazards.breach_zones),
         );
+        obj.insert(
+            "radiation_zones".into(),
+            link_zones_json(&golden.hazards.radiation_zones),
+        );
     }
 
     let mut vars_by_name: BTreeMap<&str, &crate::authoring::RoomVars> = BTreeMap::new();
@@ -715,11 +718,11 @@ fn overlay_loot_contents(slice: &mut Value, golden: &GoldenArea) -> Result<(), S
         apply_loot_overlay(obj, prop);
     }
 
-    // Serializer only emits Containers (generate_ship hash-stable). Explicit
-    // ItemPiles are appended here so playable goldens still carry contents.
+    // Serializer only emits Containers (generate_ship hash-stable). ItemPiles
+    // are appended here so playable goldens still carry authored loot.
     let mut extra: Vec<Value> = Vec::new();
     for prop in &golden.props {
-        if prop.kind != EntityKind::ItemPile || prop.inventory_mode != InventoryMode::Explicit {
+        if prop.kind != EntityKind::ItemPile {
             continue;
         }
         if containers
@@ -731,12 +734,16 @@ fn overlay_loot_contents(slice: &mut Value, golden: &GoldenArea) -> Result<(), S
         let Some(room_id) = room_stable_at(golden, prop.cell) else {
             continue;
         };
-        extra.push(itempile_loot_row(prop, &room_id));
+        let mut row = itempile_loot_row(prop, &room_id);
+        if let Some(obj) = row.as_object_mut() {
+            apply_loot_overlay(obj, prop);
+        }
+        extra.push(row);
     }
     containers.extend(extra);
 
     for prop in &golden.props {
-        if !holds_loot(prop.kind) || prop.inventory_mode != InventoryMode::Explicit {
+        if !holds_loot(prop.kind) {
             continue;
         }
         if !containers

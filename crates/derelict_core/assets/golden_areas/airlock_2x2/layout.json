@@ -30,6 +30,7 @@
     "goal_room": "airlock_01",
     "start_room": "airlock_01"
   },
+  "radiation_zones": [],
   "room_links": [],
   "rooms": [
     {
