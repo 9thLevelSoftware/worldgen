@@ -30,8 +30,12 @@ var _content_root := ""
 var _offline := true
 var _active_deck := 0
 var _pieces: Node3D
-var _gltf_cache: Dictionary = {} # module_id -> Node prototype (not in tree)
-var _missing: Dictionary = {} # module_id -> true
+var _prop_root: Node3D
+var _gltf_cache: Dictionary = {} # module_id or path -> Node prototype (not in tree)
+var _missing: Dictionary = {} # module_id or path -> true
+var _palettes: Dictionary = {}
+var prop_glb_count := 0
+var prop_fallback_count := 0
 
 
 func _ready() -> void:
@@ -40,6 +44,7 @@ func _ready() -> void:
 
 func _exit_tree() -> void:
 	_clear_pieces()
+	_clear_props()
 	_clear_cache()
 
 
@@ -49,6 +54,14 @@ func _ensure_pieces() -> void:
 	_pieces = Node3D.new()
 	_pieces.name = "Pieces"
 	add_child(_pieces)
+
+
+func _ensure_props() -> void:
+	if _prop_root != null:
+		return
+	_prop_root = Node3D.new()
+	_prop_root.name = "Props"
+	add_child(_prop_root)
 
 
 func configure(content_root: String, offline: bool) -> void:
@@ -86,8 +99,8 @@ func apply_plan(plan: Dictionary) -> void:
 	_spawn_layer(floors, "floor", true)
 	_spawn_layer(plan.get("ceiling_placements", []), "ceiling", true)
 	_spawn_layer(plan.get("placements", []), "edge", false)
-	_apply_deck_fade()
 	claimed_kit_preview = glb_count > 0 and fallback_count == 0 and not _offline
+	_apply_deck_fade()
 
 
 func status_text() -> String:
@@ -118,6 +131,45 @@ func piece_nodes() -> Array:
 	if _pieces == null:
 		return []
 	return _pieces.get_children()
+
+
+func prop_nodes() -> Array:
+	if _prop_root == null:
+		return []
+	return _prop_root.get_children()
+
+
+func apply_props(props: Array, palettes: Dictionary = {}) -> void:
+	_ensure_props()
+	_clear_props()
+	_palettes = palettes
+	prop_glb_count = 0
+	prop_fallback_count = 0
+	if props.is_empty():
+		return
+	for rec_v in props:
+		if not (rec_v is Dictionary):
+			continue
+		var rec: Dictionary = rec_v
+		if str(rec.get("kind", "")) == "Door":
+			continue
+		var node := _make_prop(rec)
+		if node == null:
+			continue
+		var cell := _prop_cell(rec)
+		node.position = Vector3(
+			float(cell.x) * CELL_SIZE_M,
+			float(cell.z) * DECK_HEIGHT_M,
+			float(cell.y) * CELL_SIZE_M
+		)
+		node.rotation_degrees = Vector3(0.0, float(int(rec.get("rotation", 0))) * 90.0, 0.0)
+		node.set_meta("deck", cell.z)
+		node.set_meta("layer", "prop")
+		node.set_meta("proto", str(rec.get("proto", "")))
+		node.set_meta("visual_id", str(rec.get("visual_id", "")))
+		node.set_meta("cell_key", "%d|%d|%d" % [cell.z, cell.x, cell.y])
+		_prop_root.add_child(node)
+	_apply_deck_fade()
 
 
 func _spawn_layer(items: Variant, layer: String, always: bool) -> void:
@@ -273,17 +325,197 @@ func _vec3(v: Variant) -> Vector3:
 	return Vector3.ZERO
 
 
+func _make_prop(rec: Dictionary) -> Node3D:
+	var proto := str(rec.get("proto", ""))
+	var visual_id := str(rec.get("visual_id", ""))
+	if visual_id.is_empty():
+		visual_id = _proto_visual_id(proto)
+	var stand_in := proto == "bunk" or bool(rec.get("stand_in", false))
+	var path := _binding_scene_path(visual_id)
+	if path.is_empty():
+		path = str(rec.get("visual_scene_path", ""))
+	var visual := _try_prop_glb(path)
+	var from_glb := visual != null
+	if visual == null:
+		prop_fallback_count += 1
+		visual = _make_prop_csg(rec, proto, stand_in)
+	else:
+		prop_glb_count += 1
+		if stand_in:
+			_attach_label(visual, "preview stand-in")
+	var wrap := Node3D.new()
+	wrap.name = "prop_%s" % proto
+	wrap.add_child(visual)
+	wrap.set_meta("from_glb", from_glb)
+	wrap.set_meta("stand_in", stand_in)
+	return wrap
+
+
+func _proto_visual_id(proto: String) -> String:
+	var map: Variant = _palettes.get("proto_visual", {})
+	if map is Dictionary and (map as Dictionary).has(proto):
+		return str((map as Dictionary)[proto])
+	return ""
+
+
+func _binding_scene_path(visual_id: String) -> String:
+	if visual_id.is_empty():
+		return ""
+	for bucket in ["components", "dressing", "objectives"]:
+		for rec_v in _palettes.get(bucket, []):
+			if not (rec_v is Dictionary):
+				continue
+			var rec: Dictionary = rec_v
+			if str(rec.get("id", rec.get("asset_id", ""))) == visual_id:
+				var path := str(rec.get("visual_scene_path", ""))
+				if path.ends_with(".tscn"):
+					return ""
+				return path
+	return ""
+
+
+func _try_prop_glb(visual_scene_path: String) -> Node3D:
+	if _offline or _content_root.is_empty():
+		return null
+	var rel := visual_scene_path.strip_edges()
+	if rel.is_empty() or rel.ends_with(".tscn"):
+		return null
+	if rel.begins_with("res://"):
+		rel = rel.substr(6)
+	if rel.contains(".."):
+		return null
+	var path := _content_root.path_join(rel).simplify_path()
+	if path.ends_with(".tscn") or not FileAccess.file_exists(path):
+		return null
+	return _load_glb_file(path)
+
+
+func _load_glb_file(path: String) -> Node3D:
+	if _missing.has(path):
+		return null
+	if _gltf_cache.has(path):
+		var proto: Node = _gltf_cache[path]
+		return proto.duplicate() as Node3D
+	var doc := GLTFDocument.new()
+	var state := GLTFState.new()
+	var err := doc.append_from_file(path, state, 0, path.get_base_dir())
+	if err != OK:
+		_missing[path] = true
+		return null
+	var scene := doc.generate_scene(state)
+	if scene == null:
+		_missing[path] = true
+		return null
+	var root := scene as Node3D
+	if root == null:
+		root = Node3D.new()
+		root.add_child(scene)
+	_gltf_cache[path] = root
+	return root.duplicate() as Node3D
+
+
+func _make_prop_csg(rec: Dictionary, proto: String, stand_in: bool) -> Node3D:
+	var root := Node3D.new()
+	var primitive := str(rec.get("primitive", ""))
+	if primitive.is_empty():
+		primitive = _gameplay_primitive(proto)
+	var albedo := _parse_color(str(rec.get("albedo", "")))
+	if albedo.a <= 0.0:
+		albedo = _gameplay_albedo(proto)
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = albedo
+	var shape := _csg_primitive(primitive)
+	shape.use_collision = false
+	shape.material = mat
+	root.add_child(shape)
+	var caption := "preview stand-in" if stand_in else proto
+	if caption.is_empty():
+		caption = "prop"
+	_attach_label(root, caption)
+	return root
+
+
+func _csg_primitive(primitive: String) -> CSGPrimitive3D:
+	match primitive.to_lower():
+		"cylinder":
+			var cyl := CSGCylinder3D.new()
+			cyl.radius = 0.28
+			cyl.height = 1.2
+			cyl.position = Vector3(0, 0.6, 0)
+			return cyl
+		"sphere":
+			var sph := CSGSphere3D.new()
+			sph.radius = 0.4
+			sph.position = Vector3(0, 0.4, 0)
+			return sph
+		"capsule":
+			var cap := CSGCylinder3D.new()
+			cap.radius = 0.22
+			cap.height = 1.0
+			cap.position = Vector3(0, 0.5, 0)
+			return cap
+		_:
+			var box := CSGBox3D.new()
+			box.size = Vector3(0.8, 1.1, 0.8)
+			box.position = Vector3(0, 0.55, 0)
+			return box
+
+
+func _gameplay_primitive(proto: String) -> String:
+	for rec_v in _palettes.get("gameplay_props", []):
+		if rec_v is Dictionary and str((rec_v as Dictionary).get("id", "")) == proto:
+			return str((rec_v as Dictionary).get("primitive", "box"))
+	return "box"
+
+
+func _gameplay_albedo(proto: String) -> Color:
+	for rec_v in _palettes.get("gameplay_props", []):
+		if rec_v is Dictionary and str((rec_v as Dictionary).get("id", "")) == proto:
+			return _parse_color(str((rec_v as Dictionary).get("albedo", "")))
+	return Color(0.62, 0.58, 0.48)
+
+
+func _parse_color(s: String) -> Color:
+	var t := s.strip_edges()
+	if t.is_empty():
+		return Color(0, 0, 0, 0)
+	if t.begins_with("#"):
+		return Color.html(t)
+	return Color(0, 0, 0, 0)
+
+
+func _attach_label(host: Node3D, text: String) -> void:
+	var lab := Label3D.new()
+	lab.text = text
+	lab.position = Vector3(0, 1.35, 0)
+	lab.pixel_size = 0.012
+	lab.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	lab.modulate = Color(1.0, 0.92, 0.55)
+	host.add_child(lab)
+
+
+func _prop_cell(rec: Dictionary) -> Vector3i:
+	var cell: Variant = rec.get("cell", [])
+	if cell is Vector3i:
+		return cell
+	if cell is Array and (cell as Array).size() >= 3:
+		var a: Array = cell
+		return Vector3i(int(a[0]), int(a[1]), int(a[2]))
+	return Vector3i.ZERO
+
+
 func _apply_deck_fade() -> void:
-	if _pieces == null:
-		return
-	for child in _pieces.get_children():
-		var deck := int(child.get_meta("deck", 0))
-		var alpha := 1.0
-		if deck > _active_deck:
-			alpha = 0.18
-		elif deck < _active_deck:
-			alpha = 0.38
-		_set_fade(child, alpha)
+	for host in [_pieces, _prop_root]:
+		if host == null:
+			continue
+		for child in host.get_children():
+			var deck := int(child.get_meta("deck", 0))
+			var alpha := 1.0
+			if deck > _active_deck:
+				alpha = 0.18
+			elif deck < _active_deck:
+				alpha = 0.38
+			_set_fade(child, alpha)
 
 
 func _set_fade(n: Node, alpha: float) -> void:
@@ -299,6 +531,14 @@ func _clear_pieces() -> void:
 		return
 	for c in _pieces.get_children():
 		_pieces.remove_child(c)
+		c.free()
+
+
+func _clear_props() -> void:
+	if _prop_root == null:
+		return
+	for c in _prop_root.get_children():
+		_prop_root.remove_child(c)
 		c.free()
 
 

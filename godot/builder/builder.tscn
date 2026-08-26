@@ -1,10 +1,11 @@
-[gd_scene load_steps=6 format=3]
+[gd_scene load_steps=7 format=3]
 
 [ext_resource type="Script" path="res://scripts/BuilderApp.gd" id="1"]
 [ext_resource type="Script" path="res://scripts/OccupancyLattice.gd" id="2"]
 [ext_resource type="Script" path="res://scripts/InspectorDock.gd" id="3"]
 [ext_resource type="Script" path="res://scripts/ContentRoot.gd" id="4"]
 [ext_resource type="Script" path="res://scripts/StructuralPreview.gd" id="5"]
+[ext_resource type="Script" path="res://scripts/PaletteDock.gd" id="6"]
 
 [node name="Builder" type="Control"]
 layout_mode = 3
@@ -111,6 +112,13 @@ text = "Portal state"
 [node name="StateList" type="VBoxContainer" parent="VBox/Body/LeftDock"]
 unique_name_in_owner = true
 layout_mode = 2
+
+[node name="PaletteDock" type="VBoxContainer" parent="VBox/Body/LeftDock"]
+unique_name_in_owner = true
+visible = false
+layout_mode = 2
+size_flags_vertical = 3
+script = ExtResource("6")
 
 [node name="LeftTitle" type="Label" parent="VBox/Body/LeftDock"]
 layout_mode = 2

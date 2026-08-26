@@ -8,15 +8,19 @@ signal room_edited(room: Dictionary, vars: Dictionary)
 signal portal_edited(portal: Dictionary)
 signal portal_removed
 signal vertical_removed
+signal prop_edited(prop: Dictionary)
+signal prop_removed
 
 var _syncing := false
 var _room: Dictionary = {}
 var _vars: Dictionary = {}
 var _portal: Dictionary = {}
 var _vertical: Dictionary = {}
+var _prop: Dictionary = {}
 var _fields: VBoxContainer
 var _portal_fields: VBoxContainer
 var _vert_fields: VBoxContainer
+var _prop_fields: VBoxContainer
 
 var _id_label: Label
 var _stable: LineEdit
@@ -45,6 +49,17 @@ var _v_cells: Label
 var _v_note: Label
 var _v_remove: Button
 
+var _pr_id: Label
+var _pr_kind: Label
+var _pr_proto: Label
+var _pr_visual: Label
+var _pr_cell: Label
+var _pr_rot: Label
+var _pr_facing: Label
+var _pr_locked: CheckBox
+var _pr_note: Label
+var _pr_remove: Button
+
 
 func _ready() -> void:
 	add_theme_constant_override("separation", 6)
@@ -54,7 +69,7 @@ func _ready() -> void:
 	add_child(title)
 
 	_empty = Label.new()
-	_empty.text = "Room list: inspect only. Paint: occupied click stamps+selects (re-click inspects). Portal: click A then a cardinal neighbor. Vertical: stacked occupied cells on N and N±1. Delete removes the selected portal or vertical."
+	_empty.text = "Room list: inspect only. Paint: occupied click stamps+selects (re-click inspects). Portal: click A then a cardinal neighbor. Vertical: stacked occupied cells on N and N±1. Props: snap to compiled wall/center slots after compile OK. Delete removes the selected portal, vertical, or prop."
 	_empty.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	add_child(_empty)
 
@@ -139,14 +154,44 @@ func _ready() -> void:
 	_vert_fields.add_child(_v_remove)
 	_vert_fields.visible = false
 
+	_prop_fields = VBoxContainer.new()
+	_prop_fields.add_theme_constant_override("separation", 6)
+	add_child(_prop_fields)
+	var prtitle := Label.new()
+	prtitle.text = "Prop"
+	prtitle.theme_type_variation = "HeaderSmall"
+	_prop_fields.add_child(prtitle)
+	_pr_id = _ro_line_in(_prop_fields, "id")
+	_pr_kind = _ro_line_in(_prop_fields, "kind")
+	_pr_proto = _ro_line_in(_prop_fields, "proto")
+	_pr_visual = _ro_line_in(_prop_fields, "visual_id")
+	_pr_cell = _ro_line_in(_prop_fields, "cell")
+	_pr_rot = _ro_line_in(_prop_fields, "rotation")
+	_pr_facing = _ro_line_in(_prop_fields, "facing")
+	_pr_locked = CheckBox.new()
+	_pr_locked.text = "locked"
+	_pr_locked.toggled.connect(func(_v: bool) -> void: _emit_prop())
+	_prop_fields.add_child(_pr_locked)
+	_pr_note = Label.new()
+	_pr_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_pr_note.modulate = Color(0.85, 0.85, 0.7)
+	_prop_fields.add_child(_pr_note)
+	_pr_remove = Button.new()
+	_pr_remove.text = "Remove prop"
+	_pr_remove.pressed.connect(func() -> void: prop_removed.emit())
+	_prop_fields.add_child(_pr_remove)
+	_prop_fields.visible = false
+
 
 func bind_room(room: Dictionary, vars: Dictionary) -> void:
 	_room = room
 	_vars = vars.duplicate(true)
 	_portal = {}
 	_vertical = {}
+	_prop = {}
 	_portal_fields.visible = false
 	_vert_fields.visible = false
+	_prop_fields.visible = false
 	if room.is_empty():
 		_empty.visible = true
 		_fields.visible = false
@@ -174,8 +219,10 @@ func bind_portal(portal: Dictionary) -> void:
 	_portal = portal.duplicate(true)
 	_room = {}
 	_vertical = {}
+	_prop = {}
 	_fields.visible = false
 	_vert_fields.visible = false
+	_prop_fields.visible = false
 	if portal.is_empty():
 		_portal_fields.visible = false
 		_empty.visible = true
@@ -205,8 +252,10 @@ func bind_vertical(vertical: Dictionary) -> void:
 	_vertical = vertical.duplicate(true)
 	_room = {}
 	_portal = {}
+	_prop = {}
 	_fields.visible = false
 	_portal_fields.visible = false
+	_prop_fields.visible = false
 	if vertical.is_empty():
 		_vert_fields.visible = false
 		_empty.visible = true
@@ -224,6 +273,37 @@ func bind_vertical(vertical: Dictionary) -> void:
 		_cell_key(vertical.get("from_cell", [])),
 		_cell_key(vertical.get("to_cell", [])),
 	]
+	_syncing = false
+
+
+func bind_prop(prop: Dictionary) -> void:
+	_prop = prop.duplicate(true)
+	_room = {}
+	_portal = {}
+	_vertical = {}
+	_fields.visible = false
+	_portal_fields.visible = false
+	_vert_fields.visible = false
+	if prop.is_empty():
+		_prop_fields.visible = false
+		_empty.visible = true
+		return
+	_empty.visible = false
+	_prop_fields.visible = true
+	_syncing = true
+	_pr_id.text = str(int(prop.get("id", 0)))
+	_pr_kind.text = str(prop.get("kind", ""))
+	_pr_proto.text = str(prop.get("proto", ""))
+	_pr_visual.text = str(prop.get("visual_id", ""))
+	_pr_cell.text = _format_xyz(prop.get("cell", []))
+	_pr_rot.text = str(int(prop.get("rotation", 0)))
+	var facing: Variant = prop.get("facing", null)
+	_pr_facing.text = str(facing) if facing != null and str(facing) != "" else "—"
+	_pr_locked.set_pressed_no_signal(bool(prop.get("locked", false)))
+	if str(prop.get("proto", "")) == "bunk" or bool(prop.get("stand_in", false)):
+		_pr_note.text = "preview stand-in: bunk → generic_locker (no bunk GLB)."
+	else:
+		_pr_note.text = "R cycles rotation 0..=3. Doors/ladders are not painted."
 	_syncing = false
 
 
@@ -247,6 +327,15 @@ func _emit() -> void:
 		"notes": _notes.text,
 	}
 	room_edited.emit(next_room, next_vars)
+
+
+func _emit_prop() -> void:
+	if _syncing or _prop.is_empty():
+		return
+	var next_prop := _prop.duplicate(true)
+	next_prop["locked"] = _pr_locked.button_pressed
+	_prop = next_prop
+	prop_edited.emit(next_prop)
 
 
 func _emit_portal() -> void:
