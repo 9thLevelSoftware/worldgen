@@ -27,15 +27,35 @@ drifting between the fragments.
 # 1. Core tests (no Godot needed)
 cargo test
 
-# 2. Look at ships without an engine
+# 2. Look at ships without an engine (default generate path)
 cargo run -p derelict_cli -- --seed 12 --archetype frigate --intactness 0.3 --all-decks
 cargo run -p derelict_cli --release -- --bench --archetype frigate   # ~27 ms/ship
 cargo run -p derelict_cli -- --sweep 20 --archetype freighter        # summaries
+cargo run -p derelict_cli -- --seed 17 --archetype corvette --export-dir target/export --kit-id ship_structural_v0
+cargo run -p derelict_cli --release -- --stress
 
-# 3. Build the extension and open the Godot project
+# 3. Validate / compile an authored golden area (skips generate; no --author-export)
+cargo run -p derelict_cli -- --author-validate crates/derelict_core/assets/golden_areas/airlock_2x2.json
+cargo run -p derelict_cli -- --author-compile crates/derelict_core/assets/golden_areas/airlock_2x2.json
+
+# 4. Build the extension and open the Godot project
 powershell -File scripts\build_windows.ps1
 # then open godot/project.godot in the Godot editor and press F5
 ```
+
+The generate path also accepts `--out <path>` for a top-down PNG, `--deck <n>`
+or `--all-decks`, `--sweep <count>`, and `--bench`. `--archetype` accepts the
+embedded shuttle, corvette, freighter, and frigate definitions.
+
+`--author-validate` and `--author-compile` are flat clap flags, mutually
+exclusive with each other. When either is set they replace the generate path
+(`--seed`, `--archetype`, `--export-dir`, `--stress`, …). They load a
+`golden_area.json`, adapt it to Topology, compile with `DefaultModulePicker`,
+and run pre-damage validation: `pre_damage([])` for `scope` room/area;
+derelict scope requires both `entry_room` and `goal_room` and a BFS path
+between them. `--author-validate` exits 0 on success and prints issues on
+stderr on failure. `--author-compile` dumps plan JSON plus issues and still
+exits non-zero on failure.
 
 The main scene is the **debug viewer**: seed entry, ship class dropdown,
 intactness slider, deck switching, room-graph/damage overlay, plus a

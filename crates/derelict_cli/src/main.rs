@@ -2,7 +2,11 @@
 //! ASCII (edge-walls at 2x resolution) or top-down PNG without any engine.
 
 use clap::Parser;
+use derelict_core::authoring::{compile_authored, GoldenArea, GoldenScope};
 use derelict_core::model::{decal, EntityKind, FloorTile, WallEdge, NO_ROOM};
+use derelict_core::structural::compile::DefaultModulePicker;
+use derelict_core::structural::plan::{StructuralPlan, Topology};
+use derelict_core::structural::validate::{validate, ValidationPolicy};
 use derelict_core::{GenData, GenParams, Ship};
 
 #[derive(Parser)]
@@ -45,10 +49,28 @@ struct Args {
     /// (1,800 ships), all fail-closed validated. Non-zero exit on any error.
     #[arg(long)]
     stress: bool,
+    /// Load, compile, and pre-damage-validate a golden_area.json. Skips generate.
+    #[arg(
+        long,
+        value_name = "GOLDEN_AREA_JSON",
+        conflicts_with = "author_compile"
+    )]
+    author_validate: Option<String>,
+    /// Compile a golden_area.json and dump StructuralPlan JSON plus issues. Skips generate.
+    #[arg(
+        long,
+        value_name = "GOLDEN_AREA_JSON",
+        conflicts_with = "author_validate"
+    )]
+    author_compile: Option<String>,
 }
 
 fn main() {
     let args = Args::parse();
+    if args.author_validate.is_some() || args.author_compile.is_some() {
+        run_author(&args);
+        return;
+    }
     let data = GenData::default_bundle().expect("embedded content data");
     let mut params = GenParams::new(&args.archetype);
     if let Some(f) = args.intactness {
@@ -167,6 +189,115 @@ fn main() {
         img.save(path).expect("failed to write png");
         println!("wrote {path}");
     }
+}
+
+#[derive(Debug)]
+struct AuthorResult {
+    id: String,
+    plan: StructuralPlan,
+    issues: Vec<String>,
+    ok: bool,
+}
+
+fn run_author(args: &Args) {
+    let dump = args.author_compile.is_some();
+    let path = args
+        .author_compile
+        .as_deref()
+        .or(args.author_validate.as_deref())
+        .expect("author path");
+    match author_golden(path) {
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        Ok(result) => {
+            if dump {
+                let payload = serde_json::json!({
+                    "plan": result.plan,
+                    "issues": result.issues,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+            }
+            for issue in &result.issues {
+                eprintln!("{issue}");
+            }
+            if !result.ok {
+                std::process::exit(1);
+            }
+            if !dump {
+                println!("ok {}", result.id);
+            }
+        }
+    }
+}
+
+fn author_golden(path: &str) -> Result<AuthorResult, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("failed to read {path}: {e}"))?;
+    let golden: GoldenArea =
+        serde_json::from_str(&text).map_err(|e| format!("failed to parse {path}: {e}"))?;
+    let topology = golden.to_topology()?;
+    let (plan, _stale) =
+        compile_authored(&topology, &DefaultModulePicker, &golden.module_overrides);
+    let mut issues = Vec::new();
+    match author_policy(&golden, &topology) {
+        Ok(policy) => {
+            if let Err(v) = validate(&plan, &topology, &policy) {
+                issues.extend(v.iter().map(ToString::to_string));
+            }
+        }
+        Err(e) => issues.push(e),
+    }
+    Ok(AuthorResult {
+        ok: issues.is_empty(),
+        id: golden.id,
+        plan,
+        issues,
+    })
+}
+
+fn author_policy(golden: &GoldenArea, topology: &Topology) -> Result<ValidationPolicy, String> {
+    match golden.scope {
+        GoldenScope::Room | GoldenScope::Area => Ok(ValidationPolicy::pre_damage(Vec::new())),
+        GoldenScope::Derelict => {
+            derelict_critical_path(golden, topology).map(ValidationPolicy::pre_damage)
+        }
+    }
+}
+
+fn derelict_critical_path(golden: &GoldenArea, topology: &Topology) -> Result<Vec<u16>, String> {
+    if golden.entry_room.is_empty() || golden.goal_room.is_empty() {
+        return Err("scope derelict requires both entry_room and goal_room".into());
+    }
+    let entry = resolve_stable_id(golden, &golden.entry_room)?;
+    let goal = resolve_stable_id(golden, &golden.goal_room)?;
+    let mut links = Vec::new();
+    for p in &topology.portals {
+        if p.from_room != NO_ROOM && p.to_room != NO_ROOM {
+            links.push((p.from_room, p.to_room));
+        }
+    }
+    for v in &topology.verticals {
+        if v.from_room != NO_ROOM && v.to_room != NO_ROOM {
+            links.push((v.from_room, v.to_room));
+        }
+    }
+    derelict_core::topology::room_path(entry, goal, &links).ok_or_else(|| {
+        format!(
+            "CriticalPathBroken: no BFS path from '{}' to '{}'",
+            golden.entry_room, golden.goal_room
+        )
+    })
+}
+
+fn resolve_stable_id(golden: &GoldenArea, stable_id: &str) -> Result<u16, String> {
+    golden
+        .topology
+        .rooms
+        .iter()
+        .find(|r| r.stable_id == stable_id)
+        .map(|r| r.id)
+        .ok_or_else(|| format!("unknown room stable_id '{stable_id}'"))
 }
 
 fn summary_line(seed: u64, ship: &Ship) -> String {
@@ -421,4 +552,35 @@ fn render_png(ship: &Ship, deck: usize) -> image::RgbImage {
     }
     let _ = NO_ROOM;
     img
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn airlock_path() -> String {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../derelict_core/assets/golden_areas/airlock_2x2.json")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn author_validate_airlock_2x2() {
+        let result = author_golden(&airlock_path()).expect("load/compile airlock_2x2");
+        assert!(
+            result.ok,
+            "airlock_2x2 must validate, issues: {:?}",
+            result.issues
+        );
+        assert!(result.issues.is_empty());
+        assert_eq!(result.id, "airlock_2x2");
+        assert!(!result.plan.occupancy.is_empty());
+    }
+
+    #[test]
+    fn author_load_missing_file_fails() {
+        let err = author_golden("does-not-exist-golden.json").expect_err("missing file");
+        assert!(err.contains("failed to read"), "{err}");
+    }
 }
