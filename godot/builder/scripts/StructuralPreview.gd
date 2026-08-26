@@ -16,6 +16,13 @@ const FAMILY_COLORS := {
 	"portal": Color(0.28, 0.78, 0.88),
 }
 
+const HAZARD_COLORS := {
+	"timed_fire": Color(1.0, 0.62, 0.14),
+	"hull_breach": Color(0.95, 0.22, 0.20),
+	"electrical_arc": Color(0.12, 0.86, 0.95),
+	"radiation": Color(0.55, 0.95, 0.22),
+}
+
 var glb_count := 0
 var fallback_count := 0
 var floor_glb_count := 0
@@ -31,6 +38,7 @@ var _offline := true
 var _active_deck := 0
 var _pieces: Node3D
 var _prop_root: Node3D
+var _hazard_root: Node3D
 var _gltf_cache: Dictionary = {} # module_id or path -> Node prototype (not in tree)
 var _missing: Dictionary = {} # module_id or path -> true
 var _palettes: Dictionary = {}
@@ -48,6 +56,7 @@ func _ready() -> void:
 func _exit_tree() -> void:
 	_clear_pieces()
 	_clear_props()
+	_clear_hazards()
 	_clear_cache()
 
 
@@ -65,6 +74,14 @@ func _ensure_props() -> void:
 	_prop_root = Node3D.new()
 	_prop_root.name = "Props"
 	add_child(_prop_root)
+
+
+func _ensure_hazards() -> void:
+	if _hazard_root != null:
+		return
+	_hazard_root = Node3D.new()
+	_hazard_root.name = "HazardMarkers"
+	add_child(_hazard_root)
 
 
 func configure(content_root: String, offline: bool) -> void:
@@ -142,6 +159,12 @@ func prop_nodes() -> Array:
 	return _prop_root.get_children()
 
 
+func hazard_nodes() -> Array:
+	if _hazard_root == null:
+		return []
+	return _hazard_root.get_children()
+
+
 func apply_props(props: Array, palettes: Dictionary = {}) -> void:
 	_ensure_props()
 	_clear_props()
@@ -212,6 +235,43 @@ func _set_highlight(n: Node, selected: bool) -> void:
 		gi.material_overlay = _highlight_material() if selected else null
 	for c in n.get_children():
 		_set_highlight(c, selected)
+
+
+func apply_hazards(zones: Array) -> void:
+	_ensure_hazards()
+	_clear_hazards()
+	for rec_v in zones:
+		if not (rec_v is Dictionary):
+			continue
+		var rec: Dictionary = rec_v
+		var a := _prop_cell({"cell": rec.get("from_cell", [])})
+		var b := _prop_cell({"cell": rec.get("to_cell", [])})
+		var pa := Vector3(float(a.x) * CELL_SIZE_M, float(a.z) * DECK_HEIGHT_M, float(a.y) * CELL_SIZE_M)
+		var pb := Vector3(float(b.x) * CELL_SIZE_M, float(b.z) * DECK_HEIGHT_M, float(b.y) * CELL_SIZE_M)
+		var box := CSGBox3D.new()
+		box.use_collision = false
+		box.position = (pa + pb) * 0.5 + Vector3(0, 1.2, 0)
+		if a == b:
+			box.size = Vector3(1.8, 2.0, 1.8)
+		elif a.x != b.x:
+			box.size = Vector3(absf(pb.x - pa.x) + 1.0, 2.0, 1.5)
+		else:
+			box.size = Vector3(1.5, 2.0, absf(pb.z - pa.z) + 1.0)
+		var kind := str(rec.get("kind", ""))
+		var col: Color = HAZARD_COLORS.get(kind, Color(0.8, 0.8, 0.3))
+		var mat := StandardMaterial3D.new()
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.albedo_color = Color(col.r, col.g, col.b, 0.32)
+		mat.emission_enabled = true
+		mat.emission = col
+		mat.emission_energy_multiplier = 0.35
+		box.material = mat
+		box.set_meta("kind", kind)
+		box.set_meta("zone_id", str(rec.get("id", "")))
+		box.set_meta("deck", a.z)
+		box.set_meta("layer", "hazard")
+		_hazard_root.add_child(box)
+	_apply_deck_fade()
 
 
 func _spawn_layer(items: Variant, layer: String, always: bool) -> void:
@@ -550,7 +610,7 @@ func _prop_cell(rec: Dictionary) -> Vector3i:
 
 
 func _apply_deck_fade() -> void:
-	for host in [_pieces, _prop_root]:
+	for host in [_pieces, _prop_root, _hazard_root]:
 		if host == null:
 			continue
 		for child in host.get_children():
@@ -587,6 +647,14 @@ func _clear_props() -> void:
 		return
 	for c in _prop_root.get_children():
 		_prop_root.remove_child(c)
+		c.free()
+
+
+func _clear_hazards() -> void:
+	if _hazard_root == null:
+		return
+	for c in _hazard_root.get_children():
+		_hazard_root.remove_child(c)
 		c.free()
 
 
