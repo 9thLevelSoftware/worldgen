@@ -2,7 +2,11 @@
 //! ASCII (edge-walls at 2x resolution) or top-down PNG without any engine.
 
 use clap::Parser;
+use derelict_core::authoring::{compile_authored, GoldenArea, GoldenScope, StaleClass};
 use derelict_core::model::{decal, EntityKind, FloorTile, WallEdge, NO_ROOM};
+use derelict_core::structural::compile::DefaultModulePicker;
+use derelict_core::structural::plan::{StructuralPlan, Topology, VerticalConnection};
+use derelict_core::structural::validate::{validate, ValidationPolicy};
 use derelict_core::{GenData, GenParams, Ship};
 
 #[derive(Parser)]
@@ -45,10 +49,28 @@ struct Args {
     /// (1,800 ships), all fail-closed validated. Non-zero exit on any error.
     #[arg(long)]
     stress: bool,
+    /// Load, compile, and pre-damage-validate a golden_area.json. Skips generate.
+    #[arg(
+        long,
+        value_name = "GOLDEN_AREA_JSON",
+        conflicts_with = "author_compile"
+    )]
+    author_validate: Option<String>,
+    /// Compile a golden_area.json and dump StructuralPlan JSON plus issues. Skips generate.
+    #[arg(
+        long,
+        value_name = "GOLDEN_AREA_JSON",
+        conflicts_with = "author_validate"
+    )]
+    author_compile: Option<String>,
 }
 
 fn main() {
     let args = Args::parse();
+    if args.author_validate.is_some() || args.author_compile.is_some() {
+        run_author(&args);
+        return;
+    }
     let data = GenData::default_bundle().expect("embedded content data");
     let mut params = GenParams::new(&args.archetype);
     if let Some(f) = args.intactness {
@@ -167,6 +189,167 @@ fn main() {
         img.save(path).expect("failed to write png");
         println!("wrote {path}");
     }
+}
+
+#[derive(Debug)]
+struct AuthorResult {
+    id: String,
+    plan: StructuralPlan,
+    issues: Vec<String>,
+    ok: bool,
+}
+
+fn run_author(args: &Args) {
+    let dump = args.author_compile.is_some();
+    let path = args
+        .author_compile
+        .as_deref()
+        .or(args.author_validate.as_deref())
+        .expect("author path");
+    match author_golden(path) {
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        Ok(result) => {
+            if dump {
+                let payload = serde_json::json!({
+                    "plan": result.plan,
+                    "issues": result.issues,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+            }
+            for issue in &result.issues {
+                eprintln!("{issue}");
+            }
+            if !result.ok {
+                std::process::exit(1);
+            }
+            if !dump {
+                println!("ok {}", result.id);
+            }
+        }
+    }
+}
+
+fn author_golden(path: &str) -> Result<AuthorResult, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("failed to read {path}: {e}"))?;
+    let golden: GoldenArea =
+        serde_json::from_str(&text).map_err(|e| format!("failed to parse {path}: {e}"))?;
+    author_golden_doc(golden)
+}
+
+fn author_golden_doc(golden: GoldenArea) -> Result<AuthorResult, String> {
+    let topology = golden.to_topology()?;
+    let (plan, stale) = compile_authored(&topology, &DefaultModulePicker, &golden.module_overrides);
+    let mut issues = Vec::new();
+    for s in stale {
+        let class = match s.class {
+            StaleClass::Floor => "floor",
+            StaleClass::Ceiling => "ceiling",
+            StaleClass::Edge => "edge",
+        };
+        issues.push(format!(
+            "stale {class} override {} -> {}",
+            s.key, s.module_id
+        ));
+    }
+    match author_policy(&golden, &topology) {
+        Ok(policy) => {
+            if let Err(v) = validate(&plan, &topology, &policy) {
+                issues.extend(v.iter().map(ToString::to_string));
+            }
+        }
+        Err(e) => issues.push(e),
+    }
+    Ok(AuthorResult {
+        ok: issues.is_empty(),
+        id: golden.id,
+        plan,
+        issues,
+    })
+}
+
+fn author_policy(golden: &GoldenArea, topology: &Topology) -> Result<ValidationPolicy, String> {
+    match golden.scope {
+        GoldenScope::Room | GoldenScope::Area => Ok(ValidationPolicy::pre_damage(Vec::new())),
+        GoldenScope::Derelict => {
+            derelict_critical_path(golden, topology).map(ValidationPolicy::pre_damage)
+        }
+    }
+}
+
+fn derelict_critical_path(golden: &GoldenArea, topology: &Topology) -> Result<Vec<u16>, String> {
+    if golden.entry_room.is_empty() || golden.goal_room.is_empty() {
+        return Err("scope derelict requires both entry_room and goal_room".into());
+    }
+    let entry = resolve_stable_id(golden, &golden.entry_room)?;
+    let goal = resolve_stable_id(golden, &golden.goal_room)?;
+    let mut links = Vec::new();
+    for p in &topology.portals {
+        if p.from_room != NO_ROOM && p.to_room != NO_ROOM {
+            links.push((p.from_room, p.to_room));
+        }
+    }
+    for v in &topology.verticals {
+        links.push(vertical_bfs_link(topology, v)?);
+    }
+    derelict_core::topology::room_path(entry, goal, &links).ok_or_else(|| {
+        format!(
+            "CriticalPathBroken: no BFS path from '{}' to '{}'",
+            golden.entry_room, golden.goal_room
+        )
+    })
+}
+
+fn vertical_bfs_link(topology: &Topology, v: &VerticalConnection) -> Result<(u16, u16), String> {
+    if v.from_room == NO_ROOM || v.to_room == NO_ROOM {
+        return Err(format!(
+            "vertical ({:?})-({:?}) uses reserved room 0",
+            v.from_cell, v.to_cell
+        ));
+    }
+    let from_room = topology
+        .room(v.from_room)
+        .ok_or_else(|| format!("vertical from_room {} does not exist", v.from_room))?;
+    let to_room = topology
+        .room(v.to_room)
+        .ok_or_else(|| format!("vertical to_room {} does not exist", v.to_room))?;
+    if !from_room.cells.contains(&v.from_cell) {
+        return Err(format!(
+            "vertical from_cell {:?} is not owned by room {}",
+            v.from_cell, v.from_room
+        ));
+    }
+    if !to_room.cells.contains(&v.to_cell) {
+        return Err(format!(
+            "vertical to_cell {:?} is not owned by room {}",
+            v.to_cell, v.to_room
+        ));
+    }
+    if v.from_cell.deck == v.to_cell.deck {
+        return Err(format!(
+            "vertical ({:?})-({:?}) must connect different decks",
+            v.from_cell, v.to_cell
+        ));
+    }
+    if v.from_cell.x != v.to_cell.x || v.from_cell.y != v.to_cell.y {
+        return Err(format!(
+            "vertical ({:?})-({:?}) must share x,y",
+            v.from_cell, v.to_cell
+        ));
+    }
+    Ok((v.from_room, v.to_room))
+}
+
+fn resolve_stable_id(golden: &GoldenArea, stable_id: &str) -> Result<u16, String> {
+    golden
+        .topology
+        .rooms
+        .iter()
+        .find(|r| r.stable_id == stable_id)
+        .map(|r| r.id)
+        .ok_or_else(|| format!("unknown room stable_id '{stable_id}'"))
 }
 
 fn summary_line(seed: u64, ship: &Ship) -> String {
@@ -421,4 +604,129 @@ fn render_png(ship: &Ship, deck: usize) -> image::RgbImage {
     }
     let _ = NO_ROOM;
     img
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn airlock_path() -> String {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../derelict_core/assets/golden_areas/airlock_2x2.json")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn author_validate_airlock_2x2() {
+        let result = author_golden(&airlock_path()).expect("load/compile airlock_2x2");
+        assert!(
+            result.ok,
+            "airlock_2x2 must validate, issues: {:?}",
+            result.issues
+        );
+        assert!(result.issues.is_empty());
+        assert_eq!(result.id, "airlock_2x2");
+        assert!(!result.plan.occupancy.is_empty());
+    }
+
+    #[test]
+    fn author_load_missing_file_fails() {
+        let err = author_golden("does-not-exist-golden.json").expect_err("missing file");
+        assert!(err.contains("failed to read"), "{err}");
+    }
+
+    fn sample() -> GoldenArea {
+        serde_json::from_str(&std::fs::read_to_string(airlock_path()).unwrap()).unwrap()
+    }
+
+    fn two_room_derelict(
+        hub_deck: u8,
+        vertical: derelict_core::authoring::VerticalConnectionDto,
+    ) -> GoldenArea {
+        let mut golden = sample();
+        golden.scope = GoldenScope::Derelict;
+        golden.goal_room = "hub_01".into();
+        golden
+            .topology
+            .rooms
+            .push(derelict_core::authoring::RoomSpecDto {
+                id: 2,
+                stable_id: "hub_01".into(),
+                role: "hub".into(),
+                deck: hub_deck,
+                cells: vec![[0, 0], [1, 0], [0, 1], [1, 1]],
+            });
+        golden.topology.verticals.push(vertical);
+        golden
+    }
+
+    #[test]
+    fn author_validate_rejects_stale_overrides() {
+        let mut golden = sample();
+        golden
+            .module_overrides
+            .floors
+            .insert("9|9|9".into(), "floor_1x1".into());
+        let result = author_golden_doc(golden).unwrap();
+        assert!(!result.ok, "stale override must fail closed");
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|i| i.contains("stale floor override") && i.contains("9|9|9")),
+            "issues: {:?}",
+            result.issues
+        );
+    }
+
+    #[test]
+    fn author_validate_rejects_malformed_vertical_links() {
+        let stacked = derelict_core::authoring::VerticalConnectionDto {
+            from_room: 1,
+            to_room: 2,
+            from_cell: [0, 0, 0],
+            to_cell: [0, 0, 1],
+        };
+        let result = author_golden_doc(two_room_derelict(1, stacked)).unwrap();
+        assert!(
+            result.ok,
+            "stacked vertical must validate, issues: {:?}",
+            result.issues
+        );
+
+        let same_deck = derelict_core::authoring::VerticalConnectionDto {
+            from_room: 1,
+            to_room: 2,
+            from_cell: [0, 0, 0],
+            to_cell: [1, 0, 0],
+        };
+        let result = author_golden_doc(two_room_derelict(0, same_deck)).unwrap();
+        assert!(!result.ok);
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|i| i.contains("must connect different decks")),
+            "issues: {:?}",
+            result.issues
+        );
+
+        let unowned = derelict_core::authoring::VerticalConnectionDto {
+            from_room: 1,
+            to_room: 2,
+            from_cell: [0, 0, 0],
+            to_cell: [9, 9, 1],
+        };
+        let result = author_golden_doc(two_room_derelict(1, unowned)).unwrap();
+        assert!(!result.ok);
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|i| i.contains("not owned by room")),
+            "issues: {:?}",
+            result.issues
+        );
+    }
 }

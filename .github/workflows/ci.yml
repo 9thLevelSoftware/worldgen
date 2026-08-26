@@ -43,3 +43,5 @@ jobs:
         run: cargo run -p derelict_cli --release -- --stress
       - name: CLI smoke
         run: cargo run -p derelict_cli -- --sweep 5 --archetype frigate
+      - name: Author golden validate
+        run: cargo run -p derelict_cli -- --author-validate crates/derelict_core/assets/golden_areas/airlock_2x2.json
