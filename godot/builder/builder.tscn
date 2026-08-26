@@ -1,0 +1,173 @@
+[gd_scene load_steps=5 format=3]
+
+[ext_resource type="Script" path="res://scripts/BuilderApp.gd" id="1"]
+[ext_resource type="Script" path="res://scripts/OccupancyLattice.gd" id="2"]
+[ext_resource type="Script" path="res://scripts/InspectorDock.gd" id="3"]
+[ext_resource type="Script" path="res://scripts/ContentRoot.gd" id="4"]
+
+[node name="Builder" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1")
+
+[node name="ContentRoot" type="Node" parent="."]
+unique_name_in_owner = true
+script = ExtResource("4")
+
+[node name="VBox" type="VBoxContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/separation = 0
+
+[node name="Banner" type="PanelContainer" parent="VBox"]
+unique_name_in_owner = true
+visible = false
+layout_mode = 2
+
+[node name="BannerLabel" type="Label" parent="VBox/Banner"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Offline: no Synaptic Sea content root"
+autowrap_mode = 3
+
+[node name="TopBar" type="HBoxContainer" parent="VBox"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="Title" type="Label" parent="VBox/TopBar"]
+layout_mode = 2
+text = "Derelict Builder"
+
+[node name="PhaseBar" type="TabBar" parent="VBox/TopBar"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="DeckDown" type="Button" parent="VBox/TopBar"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Deck −"
+
+[node name="DeckLabel" type="Label" parent="VBox/TopBar"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Deck 0 / 0"
+
+[node name="DeckUp" type="Button" parent="VBox/TopBar"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Deck +"
+
+[node name="AddDeck" type="Button" parent="VBox/TopBar"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Add deck"
+
+[node name="IsoBtn" type="Button" parent="VBox/TopBar"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Cam: Iso"
+
+[node name="RootLabel" type="Label" parent="VBox/TopBar"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+horizontal_alignment = 2
+text = "content root: —"
+clip_text = true
+
+[node name="Body" type="HSplitContainer" parent="VBox"]
+layout_mode = 2
+size_flags_vertical = 3
+split_offset = -420
+
+[node name="LeftDock" type="VBoxContainer" parent="VBox/Body"]
+custom_minimum_size = Vector2(200, 0)
+layout_mode = 2
+theme_override_constants/separation = 6
+
+[node name="LeftTitle" type="Label" parent="VBox/Body/LeftDock"]
+layout_mode = 2
+text = "Roles"
+
+[node name="RoleScroll" type="ScrollContainer" parent="VBox/Body/LeftDock"]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="RoleList" type="VBoxContainer" parent="VBox/Body/LeftDock/RoleScroll"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="NewRoomBtn" type="Button" parent="VBox/Body/LeftDock"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "New room"
+
+[node name="RoomsTitle" type="Label" parent="VBox/Body/LeftDock"]
+layout_mode = 2
+text = "Rooms"
+
+[node name="RoomList" type="ItemList" parent="VBox/Body/LeftDock"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 160)
+layout_mode = 2
+
+[node name="CenterSplit" type="HSplitContainer" parent="VBox/Body"]
+layout_mode = 2
+size_flags_horizontal = 3
+split_offset = 240
+
+[node name="View" type="SubViewportContainer" parent="VBox/Body/CenterSplit"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+stretch = true
+mouse_filter = 0
+
+[node name="SubViewport" type="SubViewport" parent="VBox/Body/CenterSplit/View"]
+unique_name_in_owner = true
+own_world_3d = true
+handle_input_locally = false
+size = Vector2i(800, 600)
+render_target_update_mode = 4
+
+[node name="OccupancyLattice" type="Node3D" parent="VBox/Body/CenterSplit/View/SubViewport"]
+unique_name_in_owner = true
+script = ExtResource("2")
+
+[node name="RightDock" type="VBoxContainer" parent="VBox/Body/CenterSplit"]
+custom_minimum_size = Vector2(280, 0)
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="InspectorDock" type="VBoxContainer" parent="VBox/Body/CenterSplit/RightDock"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 3
+script = ExtResource("3")
+
+[node name="IssuesTitle" type="Label" parent="VBox/Body/CenterSplit/RightDock"]
+layout_mode = 2
+text = "Compile issues"
+
+[node name="IssuesList" type="ItemList" parent="VBox/Body/CenterSplit/RightDock"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 180)
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="StatusLabel" type="Label" parent="VBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "LMB paint · RMB erase · click select · Q/E [ ] deck"
+autowrap_mode = 3
