@@ -1,6 +1,6 @@
 class_name ContentRoot
 extends Node
-## Resolves The Synaptic Sea content root for palettes and (later) GLB preview.
+## Resolves The Synaptic Sea content root for palettes and GLB preview.
 ## Never writes under that root; only `user://builder_settings.json`.
 
 const SETTINGS_PATH := "user://builder_settings.json"

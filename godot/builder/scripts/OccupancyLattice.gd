@@ -173,6 +173,26 @@ func hide_ghost() -> void:
 	_sync_pending_anchor()
 
 
+## Hide occupancy CSG floors when kit GLBs cover the same cells. Paint, grid,
+## ghost, and portal/vertical overlays stay active.
+func set_occupancy_floors_visible(visible: bool) -> void:
+	if _floors == null:
+		return
+	_floors.visible = visible
+
+
+func occupancy_floors_visible() -> bool:
+	return _floors != null and _floors.visible
+
+
+func has_occupied(cell: Vector3i) -> bool:
+	return _occupancy.has(_key(cell))
+
+
+func paint_cell(cell: Vector3i) -> bool:
+	return _try_paint(cell)
+
+
 func is_painting() -> bool:
 	return _lmb or _rmb
 
@@ -564,8 +584,9 @@ func _pick_cell(screen: Vector2) -> Dictionary:
 	if hit == null:
 		return {"ok": false}
 	var p: Vector3 = hit
-	var x := int(floor(p.x / CELL_SIZE_M))
-	var y := int(floor(p.z / CELL_SIZE_M))
+	# Cell::world_pos is the module center. Cell (x,y) occupies [x*4-2, x*4+2).
+	var x := int(floor((p.x + CELL_SIZE_M * 0.5) / CELL_SIZE_M))
+	var y := int(floor((p.z + CELL_SIZE_M * 0.5) / CELL_SIZE_M))
 	return {"ok": true, "cell": Vector3i(x, y, active_deck), "hit": p}
 
 
@@ -761,10 +782,11 @@ func _cell_from_key(key: String) -> Vector3i:
 
 
 func _center(x: int, y: int, deck: int) -> Vector3:
+	# Matches Cell::world_pos() / compiled kit pose (center, not min-corner).
 	return Vector3(
-		x * CELL_SIZE_M + CELL_SIZE_M * 0.5,
+		x * CELL_SIZE_M,
 		deck * DECK_HEIGHT_M,
-		y * CELL_SIZE_M + CELL_SIZE_M * 0.5
+		y * CELL_SIZE_M
 	)
 
 
@@ -1134,8 +1156,9 @@ func _has_unlinked_vertical_neighbor(cell: Vector3i) -> bool:
 
 
 func _portal_index_near(cell: Vector3i, hit: Vector3) -> int:
-	var lx := hit.x - float(cell.x) * CELL_SIZE_M
-	var lz := hit.z - float(cell.y) * CELL_SIZE_M
+	var half := CELL_SIZE_M * 0.5
+	var lx := hit.x - float(cell.x) * CELL_SIZE_M + half
+	var lz := hit.z - float(cell.y) * CELL_SIZE_M + half
 	var band := 1.05
 	var dirs: Array[Vector2i] = []
 	if lx < band:
@@ -1502,7 +1525,8 @@ func _rebuild_grid() -> void:
 	im.surface_begin(Mesh.PRIMITIVE_LINES, mat)
 	var y := active_deck * DECK_HEIGHT_M
 	for i in range(AABB_MIN, AABB_MAX + 2):
-		var t := float(i) * CELL_SIZE_M
+		# Cell edges sit 2 m off world_pos centers so lines match kit modules.
+		var t := float(i) * CELL_SIZE_M - CELL_SIZE_M * 0.5
 		var major := i % 8 == 0
 		var col := Color(0.28, 0.42, 0.62, 0.55) if major else Color(0.18, 0.22, 0.32, 0.35)
 		if i == 0:

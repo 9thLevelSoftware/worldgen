@@ -1,9 +1,10 @@
-[gd_scene load_steps=5 format=3]
+[gd_scene load_steps=6 format=3]
 
 [ext_resource type="Script" path="res://scripts/BuilderApp.gd" id="1"]
 [ext_resource type="Script" path="res://scripts/OccupancyLattice.gd" id="2"]
 [ext_resource type="Script" path="res://scripts/InspectorDock.gd" id="3"]
 [ext_resource type="Script" path="res://scripts/ContentRoot.gd" id="4"]
+[ext_resource type="Script" path="res://scripts/StructuralPreview.gd" id="5"]
 
 [node name="Builder" type="Control"]
 layout_mode = 3
@@ -161,6 +162,10 @@ render_target_update_mode = 4
 [node name="OccupancyLattice" type="Node3D" parent="VBox/Body/CenterSplit/View/SubViewport"]
 unique_name_in_owner = true
 script = ExtResource("2")
+
+[node name="StructuralPreview" type="Node3D" parent="VBox/Body/CenterSplit/View/SubViewport"]
+unique_name_in_owner = true
+script = ExtResource("5")
 
 [node name="RightDock" type="VBoxContainer" parent="VBox/Body/CenterSplit"]
 custom_minimum_size = Vector2(280, 0)

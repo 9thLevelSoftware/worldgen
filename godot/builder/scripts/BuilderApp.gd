@@ -1,7 +1,7 @@
 class_name BuilderApp
 extends Control
 ## Standalone occupancy author. Owns the GoldenArea dict and live-compiles
-## through DerelictAuthor on a 50 ms debounce. CSG floors plus authored portals.
+## through DerelictAuthor on a 50 ms debounce. StructuralPlan GLB preview.
 
 const _LATTICE := preload("res://scripts/OccupancyLattice.gd")
 const COMPILE_DEBOUNCE_S := 0.05
@@ -9,6 +9,7 @@ const COMPILE_DEBOUNCE_S := 0.05
 var author
 var golden: Dictionary = {}
 var _room_vars: Dictionary = {}
+var _content_offline := true
 var _doc_id := "untitled"
 var _display_name := "Untitled"
 var _entry_room := ""
@@ -27,6 +28,7 @@ var _compile_timer: Timer
 @onready var _view: SubViewportContainer = %View
 @onready var _viewport: SubViewport = %SubViewport
 @onready var _lattice = %OccupancyLattice
+@onready var _preview = %StructuralPreview
 @onready var _inspector = %InspectorDock
 @onready var _issues: ItemList = %IssuesList
 @onready var _status: Label = %StatusLabel
@@ -83,7 +85,7 @@ func _wire() -> void:
 	_lattice.portal_selected.connect(_on_portal_selected)
 	_lattice.vertical_selected.connect(_on_vertical_selected)
 	_lattice.tool_changed.connect(func(_t: String) -> void: _highlight_armed_tool())
-	_lattice.deck_changed.connect(func(_d: int) -> void: _sync_deck_label())
+	_lattice.deck_changed.connect(_on_deck_changed)
 	_lattice.hover_info.connect(func(t: String) -> void: _status.text = t)
 	_inspector.room_edited.connect(_on_room_edited)
 	_inspector.portal_edited.connect(_on_portal_edited)
@@ -289,25 +291,35 @@ func _refresh_room_list() -> void:
 			_room_list.select(i)
 
 
+func _on_deck_changed(_d: int) -> void:
+	_preview.set_active_deck(_lattice.active_deck)
+	_sync_deck_label()
+
+
 func _sync_deck_label() -> void:
 	_deck_label.text = "Deck %d / %d" % [_lattice.active_deck, _lattice.deck_count - 1]
 
 
 func _resolve_content() -> void:
 	if author == null:
+		_content_offline = true
 		_banner.visible = true
 		_banner_label.text = "DerelictAuthor missing. Run scripts/build_windows.ps1 -Builder."
 		_root_label.text = "content root: (extension missing)"
+		_preview.configure("", true)
 		return
 	var info: Dictionary = _content.resolve()
-	_banner.visible = bool(info.get("offline", true))
-	if info.get("offline", true):
-		_banner_label.text = "Offline: no Synaptic Sea content root — palettes from embedded RON, CSG floors only."
+	_content_offline = bool(info.get("offline", true))
+	_banner.visible = _content_offline
+	if _content_offline:
+		_banner_label.text = "Offline: no Synaptic Sea content root — palettes from embedded RON, CSG preview only."
 		_root_label.text = "content root: (offline)"
 		author.set_content_root("")
+		_preview.configure("", true)
 		return
 	var path := str(info.get("path", ""))
 	_root_label.text = "content root: %s (%s)" % [path, info.get("source", "")]
+	_preview.configure(path, false)
 	var result: Dictionary = author.set_content_root(path)
 	if not bool(result.get("ok", false)):
 		_banner.visible = true
@@ -326,13 +338,27 @@ func _schedule_compile() -> void:
 func _run_compile() -> void:
 	if author == null:
 		_show_issues([{"code": "Extension", "detail": "DerelictAuthor missing. Run scripts/build_windows.ps1 -Builder."}])
+		_preview.apply_plan({})
+		_lattice.set_occupancy_floors_visible(true)
 		return
 	var result: Dictionary = author.compile(golden)
 	if result.has("error"):
 		_show_issues([{"code": "Compile", "detail": str(result["error"])}])
+		_preview.apply_plan({})
+		_lattice.set_occupancy_floors_visible(true)
 		return
 	var issues: Array = result.get("issues", [])
 	_show_issues(issues)
+	var plan: Dictionary = result.get("plan", {})
+	_preview.set_active_deck(_lattice.active_deck)
+	_preview.apply_plan(plan)
+	# Hide occupancy CSG floors only when every occupied cell has a floor GLB.
+	_lattice.set_occupancy_floors_visible(not _preview.covers_occupied_floors())
+	if issues.is_empty() and _issues.item_count > 0:
+		_issues.set_item_text(0, "Compile OK · %s" % _preview.status_text())
+	else:
+		_issues.add_item(_preview.status_text())
+	_apply_preview_banner()
 
 
 func _show_issues(issues: Array) -> void:
@@ -345,6 +371,23 @@ func _show_issues(issues: Array) -> void:
 			_issues.add_item("%s: %s" % [iss.get("code", "?"), iss.get("detail", "")])
 		else:
 			_issues.add_item(str(iss))
+
+
+func _apply_preview_banner() -> void:
+	if author == null or _content_offline:
+		return
+	var root_errors := _banner_label.text.begins_with("Content root loaded with errors")
+	if _preview.claimed_kit_preview:
+		if root_errors:
+			return
+		_banner.visible = false
+		return
+	if _preview.fallback_count == 0:
+		return
+	if root_errors:
+		return
+	_banner.visible = true
+	_banner_label.text = "CSG fallback: %s. Not claiming kit preview." % _preview.status_text()
 
 
 func _sync_entry_goal() -> void:
