@@ -73,14 +73,29 @@ pub fn apply_module_overrides(
     }
 
     for (key, module_id) in &ov.edges {
-        match plan.edges.get_mut(key) {
-            Some(edge) => edge.module_id.clone_from(module_id),
-            None => stale.push(StaleOverride {
-                class: StaleClass::Edge,
-                key: key.clone(),
-                module_id: module_id.clone(),
-            }),
+        let kind = match plan.edges.get(key).map(|e| e.kind) {
+            Some(kind) => kind,
+            None => {
+                stale.push(StaleOverride {
+                    class: StaleClass::Edge,
+                    key: key.clone(),
+                    module_id: module_id.clone(),
+                });
+                continue;
+            }
+        };
+        if module_id.is_empty() && kind != EdgeKind::Open {
+            plan.errors.push(format!(
+                "empty module_id override for materialized {} edge {key}",
+                kind.name()
+            ));
+            continue;
         }
+        plan.edges
+            .get_mut(key)
+            .expect("edge key was present")
+            .module_id
+            .clone_from(module_id);
     }
 
     for edge in plan.edges.values_mut() {

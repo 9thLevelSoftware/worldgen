@@ -34,7 +34,7 @@ jobs:
       - name: Determinism guard (no ambient RNG in core)
         shell: bash
         run: |
-          ! grep -rnE "thread_rng|from_entropy" crates/derelict_core/src
+          ! grep -rnE --include='*.rs' '\b(thread_rng|from_entropy)\s*\(' crates/derelict_core/src
       - name: Tests
         run: cargo test --workspace
       - name: Export golden (Synaptic Sea contract)

@@ -47,7 +47,6 @@ impl DerelictGenerator {
         }
     }
 
-
     /// Start background generation; returns a request id for poll_async.
     #[func]
     fn generate_async(&mut self, seed: i64, params: VarDictionary) -> i64 {

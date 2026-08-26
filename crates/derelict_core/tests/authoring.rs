@@ -4,7 +4,7 @@ use derelict_core::authoring::{
     apply_module_overrides, compile_authored, GoldenArea, ModuleOverrides, StaleClass,
 };
 use derelict_core::structural::compile::{compile, DefaultModulePicker, WALL_MODULE};
-use derelict_core::structural::plan::{Cell, EdgeKind, NO_ROOM};
+use derelict_core::structural::plan::{Cell, EdgeKind, Topology, NO_ROOM};
 use derelict_core::structural::validate::{validate, IssueCode, ValidationPolicy};
 use derelict_core::Role;
 
@@ -210,6 +210,61 @@ fn stale_override_keys_are_dropped_not_plan_errors() {
         "stale keys must not become plan.errors"
     );
     assert!(!plan.occupancy.contains_key("9|9|9"));
+}
+
+fn assert_empty_edge_override_rejected(topo: &Topology, want: EdgeKind) {
+    let (baseline, _) = compile_authored(topo, &DefaultModulePicker, &ModuleOverrides::default());
+    let (key, previous) = baseline
+        .edges
+        .iter()
+        .find(|(_, e)| e.kind == want)
+        .map(|(k, e)| (k.clone(), e.module_id.clone()))
+        .unwrap_or_else(|| panic!("{want:?} edge must exist"));
+    assert!(
+        !previous.is_empty(),
+        "{want:?} baseline module_id must be populated"
+    );
+
+    let mut ov = ModuleOverrides::default();
+    ov.edges.insert(key.clone(), String::new());
+    let (plan, stale) = compile_authored(topo, &DefaultModulePicker, &ov);
+    assert!(stale.is_empty(), "{want:?} stale: {stale:?}");
+    assert_eq!(plan.edges[&key].module_id, previous);
+    assert!(
+        plan.errors
+            .iter()
+            .any(|e| e.contains(&key) && e.contains("empty module_id")),
+        "{want:?} errors: {:?}",
+        plan.errors
+    );
+    assert!(
+        plan.edges[&key].wrapper_required,
+        "{want:?} must stay wrapper_required"
+    );
+    assert!(
+        plan.placements.iter().any(|p| p.edge_key == key),
+        "{want:?} must remain in placements"
+    );
+    let issues = validate(&plan, topo, &pre_damage()).expect_err("empty override must fail closed");
+    assert!(
+        issues.iter().any(|i| i.code == IssueCode::CompilerError),
+        "{want:?} expected CompilerError, got: {issues:?}"
+    );
+}
+
+#[test]
+fn empty_module_id_on_materialized_edge_is_rejected() {
+    let golden = sample();
+    let topo = golden.to_topology().unwrap();
+    assert_empty_edge_override_rejected(&topo, EdgeKind::Solid);
+    assert_empty_edge_override_rejected(&topo, EdgeKind::Door);
+
+    for (state, kind) in [("LOCKED", EdgeKind::Locked), ("HATCH", EdgeKind::Hatch)] {
+        let mut golden = sample();
+        golden.topology.portals[0].state = state.to_string();
+        let topo = golden.to_topology().unwrap();
+        assert_empty_edge_override_rejected(&topo, kind);
+    }
 }
 
 #[test]

@@ -10,8 +10,8 @@
 //! UPDATE_GOLDEN=1 cargo test -p derelict_godot --test export_golden
 //! ```
 
+use derelict_core::structural::export::{to_gameplay_slice_json, to_layout_json, ExportOptions};
 use derelict_core::{GenData, GenParams};
-use derelict_core::structural::export::{to_layout_json, to_gameplay_slice_json, ExportOptions};
 use std::fmt::Write as _;
 
 const KIT_ID: &str = "ship_structural_v0";
@@ -41,7 +41,10 @@ fn compute() -> String {
         params.intactness_override = *intact;
         let ship = derelict_core::generate_ship(*seed, &params, &data).unwrap();
 
-        let opts = ExportOptions { kit_id: KIT_ID.to_string(), ..Default::default() };
+        let opts = ExportOptions {
+            kit_id: KIT_ID.to_string(),
+            ..Default::default()
+        };
         let layout_json = serde_json::to_string(&to_layout_json(&ship, &opts)).unwrap();
         let gameplay_json = serde_json::to_string(&to_gameplay_slice_json(&ship)).unwrap();
 
@@ -88,7 +91,13 @@ fn export_layout_has_required_keys() {
     let mut params = GenParams::new("shuttle");
     params.intactness_override = Some(9500);
     let ship = derelict_core::generate_ship(42, &params, &data).unwrap();
-    let json = to_layout_json(&ship, &ExportOptions { kit_id: KIT_ID.to_string(), ..Default::default() });
+    let json = to_layout_json(
+        &ship,
+        &ExportOptions {
+            kit_id: KIT_ID.to_string(),
+            ..Default::default()
+        },
+    );
     let value: serde_json::Value = json;
     let obj = value.as_object().expect("layout must be a JSON object");
 
@@ -97,8 +106,14 @@ fn export_layout_has_required_keys() {
     assert!(obj.contains_key("rooms"), "missing rooms");
     assert!(obj.contains_key("portals"), "missing portals");
     assert!(obj.contains_key("room_links"), "missing room_links");
-    assert!(obj.contains_key("structural_plan"), "missing structural_plan");
-    assert!(obj.contains_key("vertical_connections"), "missing vertical_connections");
+    assert!(
+        obj.contains_key("structural_plan"),
+        "missing structural_plan"
+    );
+    assert!(
+        obj.contains_key("vertical_connections"),
+        "missing vertical_connections"
+    );
     assert!(obj.contains_key("critical_path"), "missing critical_path");
     assert!(obj.contains_key("prototype"), "missing prototype");
 
@@ -109,11 +124,20 @@ fn export_layout_has_required_keys() {
         .as_object()
         .expect("structural_plan must be object");
     assert!(sp.contains_key("placements"), "missing placements");
-    assert!(sp.contains_key("floor_placements"), "missing floor_placements");
-    assert!(sp.contains_key("ceiling_placements"), "missing ceiling_placements");
+    assert!(
+        sp.contains_key("floor_placements"),
+        "missing floor_placements"
+    );
+    assert!(
+        sp.contains_key("ceiling_placements"),
+        "missing ceiling_placements"
+    );
     assert!(sp.contains_key("occupancy"), "missing occupancy");
     assert!(sp.contains_key("edges"), "missing edges");
-    assert!(sp.contains_key("socket_bindings"), "missing socket_bindings");
+    assert!(
+        sp.contains_key("socket_bindings"),
+        "missing socket_bindings"
+    );
 
     let floors = sp["floor_placements"]
         .as_array()
@@ -139,9 +163,14 @@ fn export_gameplay_has_required_keys() {
     assert!(obj.contains_key("start_room"), "missing start_room");
     assert!(obj.contains_key("goal_room"), "missing goal_room");
     assert!(obj.contains_key("objectives"), "missing objectives");
-    assert!(obj.contains_key("loot_containers"), "missing loot_containers");
+    assert!(
+        obj.contains_key("loot_containers"),
+        "missing loot_containers"
+    );
 
-    let start = obj["start_room"].as_str().expect("start_room must be string");
+    let start = obj["start_room"]
+        .as_str()
+        .expect("start_room must be string");
     assert!(!start.is_empty(), "start_room must not be empty");
 
     let goal = obj["goal_room"].as_str().expect("goal_room must be string");
@@ -159,7 +188,13 @@ fn export_room_ids_are_strings() {
     let mut params = GenParams::new("freighter");
     params.intactness_override = Some(9500);
     let ship = derelict_core::generate_ship(42, &params, &data).unwrap();
-    let json = to_layout_json(&ship, &ExportOptions { kit_id: KIT_ID.to_string(), ..Default::default() });
+    let json = to_layout_json(
+        &ship,
+        &ExportOptions {
+            kit_id: KIT_ID.to_string(),
+            ..Default::default()
+        },
+    );
     let value: serde_json::Value = json;
     let rooms = value["rooms"].as_array().unwrap();
 
@@ -181,7 +216,13 @@ fn export_edge_keys_are_normalized() {
     let mut params = GenParams::new("shuttle");
     params.intactness_override = Some(9500);
     let ship = derelict_core::generate_ship(42, &params, &data).unwrap();
-    let json = to_layout_json(&ship, &ExportOptions { kit_id: KIT_ID.to_string(), ..Default::default() });
+    let json = to_layout_json(
+        &ship,
+        &ExportOptions {
+            kit_id: KIT_ID.to_string(),
+            ..Default::default()
+        },
+    );
     let value: serde_json::Value = json;
     let edges = value["structural_plan"]["edges"]
         .as_object()

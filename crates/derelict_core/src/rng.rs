@@ -5,8 +5,9 @@
 //! other's rolls, and per-entity streams (e.g. one per loot container) are
 //! independent of iteration order.
 //!
-//! Rules (see plan §Determinism): no `thread_rng`, no `from_entropy`, no
-//! float-driven decisions. Weighted choices use integer cumulative weights.
+//! Rules (see plan §Determinism): no process-global RNG, no OS-entropy
+//! seeding, no float-driven decisions. Weighted choices use integer
+//! cumulative weights.
 
 use rand::{Rng, SeedableRng};
 use rand_pcg::Pcg64;
