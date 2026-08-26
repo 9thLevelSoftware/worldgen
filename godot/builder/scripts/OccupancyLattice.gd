@@ -9,6 +9,7 @@ signal portal_selected(portal: Dictionary)
 signal vertical_selected(vertical: Dictionary)
 signal prop_selected(prop: Dictionary)
 signal props_changed
+signal piece_selected(sel: Dictionary)
 signal deck_changed(deck: int)
 signal hover_info(text: String)
 signal tool_changed(tool: String)
@@ -38,6 +39,7 @@ const TOOL_PAINT := "paint"
 const TOOL_PORTAL := "portal"
 const TOOL_VERTICAL := "vertical"
 const TOOL_PROP := "prop"
+const TOOL_ASSET := "asset"
 
 ## EdgeKind::name() portal states only (not SOLID/OPEN).
 const PORTAL_STATES: PackedStringArray = ["DOOR", "LOCKED", "HATCH", "BREACH"]
@@ -101,6 +103,7 @@ var _center_slots: Dictionary = {}
 var _solid_dirs: Dictionary = {} # cell key -> PackedStringArray
 var _has_pending := false
 var _pending_cell := Vector3i.ZERO
+var _asset_sel: Dictionary = {}
 
 var _camera: Camera3D
 var _pivot: Node3D
@@ -205,6 +208,24 @@ func is_center_slot_cell(cell: Vector3i) -> bool:
 	return _center_slots.has(_key(cell))
 
 
+func get_asset_sel() -> Dictionary:
+	if _selected_kind == "piece":
+		return _asset_sel.duplicate(true)
+	return {}
+
+
+func has_vertical_at_key(key: String) -> bool:
+	return _find_vertical_touching(_cell_from_key(key)) >= 0
+
+
+func camera() -> Camera3D:
+	return _camera
+
+
+func to_viewport_point(pos: Vector2, viewport: SubViewport) -> Vector2:
+	return _to_vp(pos, viewport)
+
+
 func is_iso() -> bool:
 	return _iso
 
@@ -266,6 +287,7 @@ func create_room() -> void:
 	_selected_portal = -1
 	_selected_vertical = -1
 	_selected_prop = -1
+	_asset_sel = {}
 	_sync_floors()
 	_sync_links()
 	room_selected.emit({})
@@ -273,7 +295,7 @@ func create_room() -> void:
 
 ## Re-applying the same tool still resets the pending click (plain buttons).
 func set_tool(tool: String) -> void:
-	if tool != TOOL_PAINT and tool != TOOL_PORTAL and tool != TOOL_VERTICAL and tool != TOOL_PROP:
+	if tool != TOOL_PAINT and tool != TOOL_PORTAL and tool != TOOL_VERTICAL and tool != TOOL_PROP and tool != TOOL_ASSET:
 		return
 	active_tool = tool
 	_cancel_pending()
@@ -455,14 +477,15 @@ func cancel_pending() -> void:
 
 func stamp_role(role: String) -> void:
 	active_role = role
-	# Role palette is a room stamp. Drop portal/vertical/prop selection so the
+	# Role palette is a room stamp. Drop portal/vertical/prop/module selection so the
 	# inspector and Delete/Backspace match the highlighted room.
-	var converted := _selected_kind == "portal" or _selected_kind == "vertical" or _selected_kind == "prop"
+	var converted := _selected_kind == "portal" or _selected_kind == "vertical" or _selected_kind == "prop" or _selected_kind == "piece"
 	if converted:
 		_selected_kind = "room"
 		_selected_portal = -1
 		_selected_vertical = -1
 		_selected_prop = -1
+		_asset_sel = {}
 	var room := get_selected()
 	if room.is_empty():
 		if converted:
@@ -506,6 +529,7 @@ func select_room_id(id: int) -> void:
 	_selected_portal = -1
 	_selected_vertical = -1
 	_selected_prop = -1
+	_asset_sel = {}
 	_sync_floors()
 	_sync_links()
 	room_selected.emit(get_selected())
@@ -585,6 +609,8 @@ func handle_gui_input(event: InputEvent, viewport: SubViewport) -> void:
 				if active_tool == TOOL_PROP:
 					if not remove_prop_at(c):
 						hover_info.emit("no prop on (%d,%d) deck %d" % [c.x, c.y, c.z])
+				elif active_tool == TOOL_ASSET:
+					pass
 				elif _has_pending and not _occupancy.has(_key(c)):
 					cancel_pending()
 				else:
@@ -611,7 +637,7 @@ func handle_gui_input(event: InputEvent, viewport: SubViewport) -> void:
 		_update_ghost(c)
 		if _lmb and _paint_drag and active_tool == TOOL_PAINT:
 			_try_paint(c)
-		elif _rmb and active_tool != TOOL_PROP:
+		elif _rmb and active_tool != TOOL_PROP and active_tool != TOOL_ASSET:
 			_erase_cell(c)
 
 
@@ -762,6 +788,9 @@ func _try_lmb(cell: Vector3i) -> bool:
 		TOOL_PROP:
 			_try_lmb_prop(cell)
 			return false
+		TOOL_ASSET:
+			_try_lmb_asset(cell)
+			return false
 		_:
 			return _try_lmb_paint(cell)
 
@@ -804,6 +833,7 @@ func _try_paint(cell: Vector3i) -> bool:
 	_selected_portal = -1
 	_selected_vertical = -1
 	_selected_prop = -1
+	_asset_sel = {}
 	_prune_links()
 	_sync_deck_count()
 	_sync_floors()
@@ -1003,6 +1033,8 @@ func _update_ghost(cell: Vector3i) -> void:
 			_update_vertical_ghost(cell)
 		TOOL_PROP:
 			_update_prop_ghost(cell)
+		TOOL_ASSET:
+			_update_asset_ghost(cell)
 		_:
 			_update_paint_ghost(cell)
 
@@ -1032,6 +1064,186 @@ func _room_role(id: int) -> String:
 		if int(r["id"]) == id:
 			return str(r["role"])
 	return ""
+
+
+func _try_lmb_asset(cell: Vector3i) -> void:
+	var sel := pick_compiled_at(cell, _last_hit)
+	if sel.is_empty():
+		_asset_sel = {}
+		_selected_kind = "room"
+		hover_info.emit("no compiled floor/wall/portal here")
+		room_selected.emit({})
+		return
+	_apply_asset_sel(sel)
+
+
+func pick_compiled_at(cell: Vector3i, hit: Vector3) -> Dictionary:
+	var edge := _closest_pickable_edge(cell, hit)
+	if not edge.is_empty():
+		return edge
+	if _occupancy.has(_key(cell)):
+		return _floor_sel(cell)
+	return {}
+
+
+func _apply_asset_sel(sel: Dictionary) -> void:
+	_asset_sel = sel.duplicate(true)
+	_selected_kind = "piece"
+	_selected_portal = int(sel.get("portal_index", -1))
+	_selected_vertical = -1
+	_selected_prop = -1
+	if sel.get("ov_map", "") == "floors" or sel.get("ov_map", "") == "ceilings":
+		var key := str(sel.get("key", ""))
+		if _occupancy.has(key):
+			_selected_id = int(_occupancy[key])
+	elif _selected_portal >= 0 and _selected_portal < _portals.size():
+		_selected_id = int(_portals[_selected_portal].get("from_room", 0))
+	else:
+		var a := _xyz_cell(sel.get("from_cell", []))
+		var b := _xyz_cell(sel.get("to_cell", []))
+		if _occupancy.has(_key(a)):
+			_selected_id = int(_occupancy[_key(a)])
+		elif _occupancy.has(_key(b)):
+			_selected_id = int(_occupancy[_key(b)])
+	_sync_floors()
+	_sync_links()
+	piece_selected.emit(_asset_sel.duplicate(true))
+
+
+func _refresh_asset_sel(sel: Dictionary) -> Dictionary:
+	if sel.is_empty():
+		return {}
+	var ov_map := str(sel.get("ov_map", ""))
+	if ov_map == "floors" or ov_map == "ceilings":
+		var key := str(sel.get("key", ""))
+		if not _occupancy.has(key):
+			return {}
+		var cell := _cell_from_key(key)
+		if ov_map == "ceilings":
+			return _ceiling_sel(cell)
+		return _floor_sel(cell)
+	if ov_map == "edges":
+		var a := _xyz_cell(sel.get("from_cell", []))
+		var b := _xyz_cell(sel.get("to_cell", []))
+		if a == Vector3i.ZERO and b == Vector3i.ZERO:
+			return {}
+		return _edge_sel(a, b)
+	return {}
+
+
+func _floor_sel(cell: Vector3i) -> Dictionary:
+	var id := int(_occupancy.get(_key(cell), 0))
+	return {
+		"ov_map": "floors",
+		"kind": "floor",
+		"state": _room_role(id),
+		"key": _key(cell),
+		"cell": _cell_xyz(cell),
+		"role": _room_role(id),
+	}
+
+
+func _ceiling_sel(cell: Vector3i) -> Dictionary:
+	var id := int(_occupancy.get(_key(cell), 0))
+	var suppressed := _find_vertical_touching(cell) >= 0
+	return {
+		"ov_map": "ceilings",
+		"kind": "ceiling",
+		"state": "",
+		"key": _key(cell),
+		"cell": _cell_xyz(cell),
+		"role": _room_role(id),
+		"note": "Ceiling is suppressed on this vertical opening." if suppressed else "",
+	}
+
+
+func _edge_sel(a: Vector3i, b: Vector3i) -> Dictionary:
+	if not _is_cardinal(a, b):
+		return {}
+	var key := edge_key_between(a, b)
+	var pidx := _find_portal(a, b)
+	if pidx >= 0:
+		var p: Dictionary = _portals[pidx]
+		return {
+			"ov_map": "edges",
+			"kind": "portal",
+			"state": str(p.get("state", "DOOR")),
+			"key": key,
+			"from_cell": p.get("from_cell", _cell_xyz(a)),
+			"to_cell": p.get("to_cell", _cell_xyz(b)),
+			"portal_index": pidx,
+			"exterior": bool(p.get("exterior", false)),
+		}
+	if _edge_is_open(a, b):
+		return {}
+	var occupied := _occupancy.has(_key(a)) or _occupancy.has(_key(b))
+	if not occupied:
+		return {}
+	return {
+		"ov_map": "edges",
+		"kind": "wall",
+		"state": "SOLID",
+		"key": key,
+		"from_cell": _cell_xyz(a),
+		"to_cell": _cell_xyz(b),
+		"portal_index": -1,
+	}
+
+
+func _edge_is_open(a: Vector3i, b: Vector3i) -> bool:
+	if not _occupancy.has(_key(a)) or not _occupancy.has(_key(b)):
+		return false
+	return int(_occupancy[_key(a)]) == int(_occupancy[_key(b)])
+
+
+func edge_key_between(a: Vector3i, b: Vector3i) -> String:
+	# plan.rs: N/S → deck|h|min(y,ny)|x ; E/W → deck|v|y|min(x,nx)
+	if a.x == b.x:
+		return "%d|h|%d|%d" % [a.z, mini(a.y, b.y), a.x]
+	return "%d|v|%d|%d" % [a.z, a.y, mini(a.x, b.x)]
+
+
+func _closest_pickable_edge(cell: Vector3i, hit: Vector3) -> Dictionary:
+	var best: Dictionary = {}
+	var best_d := 1.05
+	for spec in _edge_bands(cell, hit):
+		var d: float = spec["dist"]
+		if d >= best_d:
+			continue
+		var n: Vector3i = spec["neighbor"]
+		var sel := _edge_sel(cell, n)
+		if sel.is_empty():
+			continue
+		best_d = d
+		best = sel
+	return best
+
+
+func _edge_bands(cell: Vector3i, hit: Vector3) -> Array:
+	var half := CELL_SIZE_M * 0.5
+	var lx := hit.x - float(cell.x) * CELL_SIZE_M + half
+	var lz := hit.z - float(cell.y) * CELL_SIZE_M + half
+	return [
+		{"dist": lx, "neighbor": Vector3i(cell.x - 1, cell.y, cell.z)},
+		{"dist": CELL_SIZE_M - lx, "neighbor": Vector3i(cell.x + 1, cell.y, cell.z)},
+		{"dist": lz, "neighbor": Vector3i(cell.x, cell.y - 1, cell.z)},
+		{"dist": CELL_SIZE_M - lz, "neighbor": Vector3i(cell.x, cell.y + 1, cell.z)},
+	]
+
+
+func _update_asset_ghost(cell: Vector3i) -> void:
+	var sel := pick_compiled_at(cell, _last_hit)
+	if sel.is_empty():
+		_ghost.visible = false
+		hover_info.emit("assign module: click a compiled floor, wall, or portal")
+		return
+	var kind := str(sel.get("kind", ""))
+	if kind == "floor" or kind == "ceiling":
+		_place_cell_ghost(cell, "", "assign %s %s" % [kind, sel.get("key", "")])
+		return
+	var a := _xyz_cell(sel.get("from_cell", []))
+	var b := _xyz_cell(sel.get("to_cell", []))
+	_place_edge_ghost(a, b, "", "assign %s %s" % [kind, sel.get("key", "")])
 
 
 func _color_for(room: Dictionary) -> Color:
@@ -1426,10 +1638,16 @@ func _emit_selection() -> void:
 	if _selected_kind == "prop" and _selected_prop >= 0 and _selected_prop < _props.size():
 		prop_selected.emit(_prop_dto(_props[_selected_prop]))
 		return
+	if _selected_kind == "piece":
+		_asset_sel = _refresh_asset_sel(_asset_sel)
+		if not _asset_sel.is_empty():
+			piece_selected.emit(_asset_sel.duplicate(true))
+			return
 	_selected_kind = "room"
 	_selected_portal = -1
 	_selected_vertical = -1
 	_selected_prop = -1
+	_asset_sel = {}
 	room_selected.emit(get_selected())
 
 
@@ -1448,6 +1666,7 @@ func _begin_pending(cell: Vector3i) -> void:
 	_selected_portal = -1
 	_selected_vertical = -1
 	_selected_prop = -1
+	_asset_sel = {}
 	if _occupancy.has(_key(cell)):
 		_selected_id = int(_occupancy[_key(cell)])
 	_sync_pending_anchor()
@@ -1744,6 +1963,7 @@ func _select_prop(index: int) -> void:
 	_selected_prop = index
 	_selected_portal = -1
 	_selected_vertical = -1
+	_asset_sel = {}
 	var cell := _xyz_cell(_props[index].get("cell", []))
 	if _occupancy.has(_key(cell)):
 		_selected_id = int(_occupancy[_key(cell)])

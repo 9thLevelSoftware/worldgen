@@ -10,6 +10,11 @@ var author
 var golden: Dictionary = {}
 var _room_vars: Dictionary = {}
 var _palettes: Dictionary = {}
+var _module_overrides: Dictionary = {"floors": {}, "ceilings": {}, "edges": {}}
+var _edge_override_kinds: Dictionary = {}
+var _dressed: Dictionary = {"floors": {}, "ceilings": {}, "edges": {}}
+var _last_plan: Dictionary = {}
+var _module_sel: Dictionary = {}
 var _content_offline := true
 var _doc_id := "untitled"
 var _display_name := "Untitled"
@@ -55,8 +60,9 @@ func _ready() -> void:
 	_resolve_content()
 	_schedule_compile()
 	_sync_deck_label()
+	_refresh_phases()
 	_apply_phase(0)
-	_status.text = "Paint LMB · RMB erase · Portal: click A then neighbor · Vertical: stacked N/N±1 · Del removes selected portal/vertical · Esc cancels pending · Q/E deck"
+	_status.text = "Paint LMB · RMB erase · Portal: click A then neighbor · Vertical: stacked N/N±1 · Assign module: click compiled floor/wall/portal · Del removes selected portal/vertical · Esc cancels pending · Q/E deck"
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -98,7 +104,8 @@ func _wire() -> void:
 	_lattice.vertical_selected.connect(_on_vertical_selected)
 	_lattice.prop_selected.connect(_on_prop_selected)
 	_lattice.props_changed.connect(_on_props_changed)
-	_lattice.tool_changed.connect(func(_t: String) -> void: _highlight_armed_tool())
+	_lattice.piece_selected.connect(_on_piece_selected)
+	_lattice.tool_changed.connect(_on_tool_changed)
 	_lattice.deck_changed.connect(_on_deck_changed)
 	_lattice.hover_info.connect(func(t: String) -> void: _status.text = t)
 	_inspector.room_edited.connect(_on_room_edited)
@@ -107,6 +114,8 @@ func _wire() -> void:
 	_inspector.vertical_removed.connect(func() -> void: _lattice.remove_selected_vertical())
 	_inspector.prop_edited.connect(func(p: Dictionary) -> void: _lattice.apply_prop_edit(p))
 	_inspector.prop_removed.connect(func() -> void: _lattice.remove_selected_prop())
+	_inspector.module_override_set.connect(_on_module_override_set)
+	_inspector.module_inspect_requested.connect(_on_piece_selected)
 	_palette.prop_armed.connect(func(e: Dictionary) -> void: _lattice.arm_prop(e))
 	_phase_bar.tab_changed.connect(_on_phase_tab)
 	_room_list.item_selected.connect(_on_room_list_selected)
@@ -132,14 +141,21 @@ func _on_phase_tab(idx: int) -> void:
 	if idx == 1 and not _compile_ok:
 		_phase_bar.current_tab = 0
 		return
-	if idx >= 2:
-		_phase_bar.current_tab = 0 if not _compile_ok else mini(_phase_bar.current_tab, 1)
+	if idx == 2:
+		if _lattice.get_rooms().is_empty():
+			_phase_bar.current_tab = 0
+			return
+		_apply_phase(idx)
+		return
+	if idx >= 3:
+		_phase_bar.current_tab = 0
 		return
 	_apply_phase(idx)
 
 
 func _apply_phase(idx: int) -> void:
 	var props_phase: bool = idx == 1 and _compile_ok
+	var assets_phase: bool = idx == 2
 	_palette.visible = props_phase
 	_tools_title.visible = not props_phase
 	_tool_list.visible = not props_phase
@@ -150,13 +166,19 @@ func _apply_phase(idx: int) -> void:
 	_new_room_btn.visible = not props_phase
 	_lattice.set_slot_overlay_visible(props_phase)
 	if props_phase:
-		_lattice.set_tool(_LATTICE.TOOL_PROP)
+		if _lattice.active_tool != _LATTICE.TOOL_PROP:
+			_lattice.set_tool(_LATTICE.TOOL_PROP)
 		var room: Dictionary = _lattice.get_selected()
 		_palette.set_role_filter(str(room.get("role", "")))
 		_status.text = "Props: LMB place/select · RMB delete · R rotate · Del remove · reserved (door/vertical) blocked"
-	elif _lattice.active_tool == _LATTICE.TOOL_PROP:
-		_lattice.set_tool(_LATTICE.TOOL_PAINT)
-		_status.text = "Paint LMB · RMB erase · Portal: click A then neighbor · Vertical: stacked N/N±1 · Del removes selected · Q/E deck"
+	elif assets_phase:
+		if _lattice.active_tool != _LATTICE.TOOL_ASSET:
+			_lattice.set_tool(_LATTICE.TOOL_ASSET)
+		_status.text = "Assign module: click compiled floor/wall/portal · Del removes selected portal/vertical · Esc cancels pending · Q/E deck"
+	else:
+		if _lattice.active_tool == _LATTICE.TOOL_PROP or _lattice.active_tool == _LATTICE.TOOL_ASSET:
+			_lattice.set_tool(_LATTICE.TOOL_PAINT)
+		_status.text = "Paint LMB · RMB erase · Portal: click A then neighbor · Vertical: stacked N/N±1 · Assign module: click compiled floor/wall/portal · Del removes selected · Q/E deck"
 
 
 func _build_tools() -> void:
@@ -164,6 +186,7 @@ func _build_tools() -> void:
 		["Paint occupancy", _LATTICE.TOOL_PAINT],
 		["Portal / exit", _LATTICE.TOOL_PORTAL],
 		["Vertical opening", _LATTICE.TOOL_VERTICAL],
+		["Assign module", _LATTICE.TOOL_ASSET],
 	]
 	for spec in tools:
 		var b := Button.new()
@@ -198,6 +221,7 @@ func _highlight_armed_tool() -> void:
 		_LATTICE.TOOL_PORTAL: "Portal / exit",
 		_LATTICE.TOOL_VERTICAL: "Vertical opening",
 		_LATTICE.TOOL_PROP: "Place prop",
+		_LATTICE.TOOL_ASSET: "Assign module",
 	}
 	var want := str(labels.get(armed, "Paint occupancy"))
 	for child in _tool_list.get_children():
@@ -267,10 +291,13 @@ func _on_occupancy_changed() -> void:
 	_sync_entry_goal()
 	_prune_room_vars()
 	_refresh_room_list()
+	_refresh_phases()
 	_schedule_compile()
 
 
 func _on_room_selected(room: Dictionary) -> void:
+	_module_sel = {}
+	_preview.highlight_selection("", "")
 	if room.is_empty():
 		_inspector.clear()
 		_room_list.deselect_all()
@@ -286,6 +313,8 @@ func _on_room_selected(room: Dictionary) -> void:
 
 
 func _on_portal_selected(portal: Dictionary) -> void:
+	_module_sel = {}
+	_preview.highlight_selection("", "")
 	if portal.is_empty():
 		_inspector.clear()
 		return
@@ -299,6 +328,8 @@ func _on_portal_selected(portal: Dictionary) -> void:
 
 
 func _on_vertical_selected(vertical: Dictionary) -> void:
+	_module_sel = {}
+	_preview.highlight_selection("", "")
 	if vertical.is_empty():
 		_inspector.clear()
 		return
@@ -311,6 +342,8 @@ func _on_vertical_selected(vertical: Dictionary) -> void:
 
 
 func _on_prop_selected(prop: Dictionary) -> void:
+	_module_sel = {}
+	_preview.highlight_selection("", "")
 	if prop.is_empty():
 		_inspector.clear()
 		return
@@ -341,6 +374,212 @@ func _room_at(cell: Vector3i) -> Dictionary:
 
 func _refresh_prop_preview() -> void:
 	_preview.apply_props(_lattice.get_props(), _palettes)
+
+
+func _on_piece_selected(sel: Dictionary) -> void:
+	if sel.is_empty():
+		_module_sel = {}
+		_preview.highlight_selection("", "")
+		_inspector.clear()
+		return
+	_bind_module_sel(sel)
+
+
+func _bind_module_sel(sel: Dictionary) -> void:
+	var next := _enrich_module_sel(sel)
+	_module_sel = next
+	var layer := "floor"
+	if str(next.get("ov_map", "")) == "ceilings":
+		layer = "ceiling"
+	elif str(next.get("ov_map", "")) == "edges":
+		layer = "edge"
+	_preview.highlight_selection(layer, str(next.get("key", "")))
+	var legal := PackedStringArray()
+	if author != null and str(next.get("kind", "")) != "":
+		legal = author.legal_modules(str(next["kind"]), str(next.get("state", "")))
+	_inspector.bind_module(next, legal)
+
+
+func _enrich_module_sel(sel: Dictionary) -> Dictionary:
+	var next := sel.duplicate(true)
+	var ov_map := str(next.get("ov_map", ""))
+	var key := str(next.get("key", ""))
+	var ov: Dictionary = _module_overrides.get(ov_map, {})
+	var dressed_map: Dictionary = _dressed.get(ov_map, {})
+	var current := _plan_module_id(ov_map, key)
+	if ov.has(key):
+		current = str(ov[key])
+	if current.is_empty():
+		current = str(next.get("module_id", ""))
+	next["module_id"] = current
+	next["overridden"] = ov.has(key)
+	var dressed := str(dressed_map.get(key, ""))
+	if dressed.is_empty():
+		dressed = current
+	next["dressed_id"] = dressed
+	if ov_map == "edges":
+		var edge := _plan_edge(key)
+		var edge_state := str(edge.get("state", edge.get("kind", next.get("state", "SOLID"))))
+		if str(next.get("kind", "")) != "portal":
+			var vk := _vertex_state(dressed)
+			if vk.is_empty() and not next.get("overridden", false):
+				vk = _vertex_state(current)
+			if not vk.is_empty():
+				next["kind"] = "vertex"
+				next["state"] = vk
+			else:
+				next["kind"] = "wall"
+				next["state"] = "SOLID"
+		else:
+			next["state"] = str(next.get("state", edge_state))
+	if ov_map == "floors":
+		var role := str(next.get("role", next.get("state", "")))
+		next["kind"] = "floor"
+		next["state"] = role
+		var cell := _cell3_from_key(key)
+		var ceil := {
+			"ov_map": "ceilings",
+			"kind": "ceiling",
+			"state": "",
+			"key": key,
+			"cell": next.get("cell", cell),
+			"role": role,
+			"alt_label": "Inspect floor",
+			"alt": {
+				"ov_map": "floors",
+				"kind": "floor",
+				"state": role,
+				"key": key,
+				"cell": next.get("cell", cell),
+				"role": role,
+			},
+		}
+		next["alt_label"] = "Inspect ceiling"
+		next["alt"] = ceil
+	elif ov_map == "ceilings":
+		var role := str(next.get("role", ""))
+		next["kind"] = "ceiling"
+		next["state"] = ""
+		var cell := next.get("cell", _cell3_from_key(key))
+		next["alt_label"] = "Inspect floor"
+		next["alt"] = {
+			"ov_map": "floors",
+			"kind": "floor",
+			"state": role,
+			"key": key,
+			"cell": cell,
+			"role": role,
+		}
+		if _lattice.has_vertical_at_key(key):
+			next["note"] = "Ceiling is suppressed on this vertical opening."
+			next["assignable"] = false
+	var preferred := PackedStringArray()
+	if author != null:
+		preferred = author.legal_modules(str(next.get("kind", "")), str(next.get("state", "")))
+	if not preferred.is_empty():
+		next["default_id"] = preferred[0]
+	return next
+
+
+func _vertex_state(module_id: String) -> String:
+	match module_id:
+		"wall_inner_corner":
+			return "inner"
+		"wall_outer_corner":
+			return "outer"
+		"wall_t_junction":
+			return "t"
+		_:
+			return ""
+
+
+func _plan_module_id(ov_map: String, key: String) -> String:
+	if ov_map == "floors":
+		for rec_v in _last_plan.get("floor_placements", []):
+			if rec_v is Dictionary and str(rec_v.get("cell_key", "")) == key:
+				return str(rec_v.get("module_id", ""))
+		var occ: Variant = _last_plan.get("occupancy", {})
+		if occ is Dictionary and (occ as Dictionary).has(key):
+			var rec: Variant = occ[key]
+			if rec is Dictionary:
+				return str(rec.get("module_id", ""))
+	elif ov_map == "ceilings":
+		for rec_v in _last_plan.get("ceiling_placements", []):
+			if rec_v is Dictionary and str(rec_v.get("cell_key", "")) == key:
+				return str(rec_v.get("module_id", ""))
+	elif ov_map == "edges":
+		var edge := _plan_edge(key)
+		return str(edge.get("module_id", ""))
+	return ""
+
+
+func _plan_edge(key: String) -> Dictionary:
+	var edges: Variant = _last_plan.get("edges", {})
+	if edges is Dictionary and (edges as Dictionary).has(key):
+		var rec: Variant = edges[key]
+		if rec is Dictionary:
+			return rec
+	for rec_v in _last_plan.get("placements", []):
+		if rec_v is Dictionary:
+			var rec: Dictionary = rec_v
+			if str(rec.get("edge_key", rec.get("key", ""))) == key:
+				return rec
+	return {}
+
+
+func _cell3_from_key(key: String) -> Array:
+	var parts := key.split("|")
+	if parts.size() != 3:
+		return [0, 0, 0]
+	return [int(parts[1]), int(parts[2]), int(parts[0])]
+
+
+func _on_module_override_set(ov_map: String, key: String, module_id: String) -> void:
+	if ov_map != "floors" and ov_map != "ceilings" and ov_map != "edges":
+		return
+	if key.is_empty() or module_id.is_empty():
+		return
+	if ov_map == "ceilings" and _lattice.has_vertical_at_key(key):
+		return
+	if not _module_overrides.has(ov_map) or not (_module_overrides[ov_map] is Dictionary):
+		_module_overrides[ov_map] = {}
+	(_module_overrides[ov_map] as Dictionary)[key] = module_id
+	if ov_map == "edges":
+		var edge := _plan_edge(key)
+		_edge_override_kinds[key] = str(edge.get("kind", edge.get("state", "")))
+	if not _module_sel.is_empty():
+		_module_sel["module_id"] = module_id
+		_module_sel["overridden"] = true
+	_schedule_compile()
+
+
+func _on_tool_changed(_t: String) -> void:
+	_highlight_armed_tool()
+	if _lattice.active_tool == _LATTICE.TOOL_ASSET:
+		if _phase_bar.current_tab != 2 and not _phase_bar.is_tab_disabled(2):
+			_phase_bar.set_block_signals(true)
+			_phase_bar.current_tab = 2
+			_phase_bar.set_block_signals(false)
+			_apply_phase(2)
+	elif _lattice.active_tool == _LATTICE.TOOL_PROP:
+		if _phase_bar.current_tab != 1 and not _phase_bar.is_tab_disabled(1):
+			_phase_bar.set_block_signals(true)
+			_phase_bar.current_tab = 1
+			_phase_bar.set_block_signals(false)
+			_apply_phase(1)
+	elif _phase_bar.current_tab == 2 or _phase_bar.current_tab == 1:
+		_phase_bar.set_block_signals(true)
+		_phase_bar.current_tab = 0
+		_phase_bar.set_block_signals(false)
+		_apply_phase(0)
+
+
+func _refresh_phases() -> void:
+	var has_occ := not _lattice.get_rooms().is_empty()
+	_phase_bar.set_tab_disabled(2, not has_occ)
+	if not has_occ and _phase_bar.current_tab == 2:
+		_phase_bar.current_tab = 0
+		_apply_phase(0)
 
 
 func _on_portal_edited(portal: Dictionary) -> void:
@@ -435,7 +674,7 @@ func _schedule_compile() -> void:
 
 func _run_compile() -> void:
 	if author == null:
-		_show_issues([{"code": "Extension", "detail": "DerelictAuthor missing. Run scripts/build_windows.ps1 -Builder."}])
+		_show_issues([{"code": "Extension", "detail": "DerelictAuthor missing. Run scripts/build_windows.ps1 -Builder."}], [])
 		_preview.apply_plan({})
 		_preview.apply_props([], _palettes)
 		_lattice.set_compile_result({}, {}, false)
@@ -444,7 +683,7 @@ func _run_compile() -> void:
 		return
 	var result: Dictionary = author.compile(golden)
 	if result.has("error"):
-		_show_issues([{"code": "Compile", "detail": str(result["error"])}])
+		_show_issues([{"code": "Compile", "detail": str(result["error"])}], [])
 		_preview.apply_plan({})
 		_preview.apply_props([], _palettes)
 		_lattice.set_compile_result({}, {}, false)
@@ -452,23 +691,32 @@ func _run_compile() -> void:
 		_set_phase2_ready(false)
 		return
 	var issues: Array = result.get("issues", [])
-	_show_issues(issues)
+	var stale: Array = result.get("stale_overrides", [])
+	_show_issues(issues, stale)
 	var plan: Dictionary = result.get("plan", {})
 	var zones: Dictionary = result.get("zones", {})
 	var occupancy_ok: bool = not _lattice.get_rooms().is_empty()
 	var ok: bool = issues.is_empty() and occupancy_ok
 	_lattice.set_compile_result(zones, plan, ok)
+	_last_plan = plan
+	if _prune_stale_module_overrides():
+		golden = _golden_from_lattice()
+		_schedule_compile()
+		return
+	_capture_dressed(plan)
 	_preview.set_active_deck(_lattice.active_deck)
 	_preview.apply_plan(plan)
 	_preview.apply_props(_lattice.get_props(), _palettes)
 	# Hide occupancy CSG floors only when every occupied cell has a floor GLB.
 	_lattice.set_occupancy_floors_visible(not _preview.covers_occupied_floors())
-	if issues.is_empty() and _issues.item_count > 0:
+	if issues.is_empty() and stale.is_empty() and _issues.item_count > 0:
 		_issues.set_item_text(0, "Compile OK · %s" % _preview.status_text())
 	else:
 		_issues.add_item(_preview.status_text())
 	_apply_preview_banner()
 	_set_phase2_ready(ok)
+	if not _module_sel.is_empty():
+		_bind_module_sel(_module_sel)
 
 
 func _set_phase2_ready(ok: bool) -> void:
@@ -481,9 +729,9 @@ func _set_phase2_ready(ok: bool) -> void:
 		_lattice.set_slot_overlay_visible(true)
 
 
-func _show_issues(issues: Array) -> void:
+func _show_issues(issues: Array, stale: Array = []) -> void:
 	_issues.clear()
-	if issues.is_empty():
+	if issues.is_empty() and stale.is_empty():
 		_issues.add_item("Compile OK")
 		return
 	for iss in issues:
@@ -491,6 +739,13 @@ func _show_issues(issues: Array) -> void:
 			_issues.add_item("%s: %s" % [iss.get("code", "?"), iss.get("detail", "")])
 		else:
 			_issues.add_item(str(iss))
+	for s in stale:
+		if s is Dictionary:
+			_issues.add_item("stale_override: %s %s → %s" % [
+				s.get("class", "?"), s.get("key", ""), s.get("module_id", "")
+			])
+		else:
+			_issues.add_item(str(s))
 
 
 func _apply_preview_banner() -> void:
@@ -596,9 +851,13 @@ func _golden_from_lattice() -> Dictionary:
 	g["scope"] = scope
 	g["entry_room"] = _entry_room
 	g["goal_room"] = _goal_room
+	var portals: Array = _lattice.get_portals()
+	for p in portals:
+		if p is Dictionary:
+			(p as Dictionary).erase("module_id")
 	g["topology"] = {
 		"rooms": rooms,
-		"portals": _lattice.get_portals(),
+		"portals": portals,
 		"verticals": _lattice.get_verticals(),
 	}
 	g["room_vars"] = _room_vars.duplicate(true)
@@ -608,4 +867,72 @@ func _golden_from_lattice() -> Dictionary:
 			continue
 		props.append(p)
 	g["props"] = props
+	g["module_overrides"] = {
+		"floors": (_module_overrides.get("floors", {}) as Dictionary).duplicate(true),
+		"ceilings": (_module_overrides.get("ceilings", {}) as Dictionary).duplicate(true),
+		"edges": (_module_overrides.get("edges", {}) as Dictionary).duplicate(true),
+	}
 	return g
+
+
+func _prune_stale_module_overrides() -> bool:
+	var dirty := false
+	var ceil: Dictionary = _module_overrides.get("ceilings", {})
+	for key in ceil.keys():
+		if _lattice.has_vertical_at_key(str(key)):
+			ceil.erase(key)
+			dirty = true
+	var ov: Dictionary = _module_overrides.get("edges", {})
+	for key in ov.keys():
+		var rec := _plan_edge(str(key))
+		if rec.is_empty():
+			ov.erase(key)
+			_edge_override_kinds.erase(key)
+			dirty = true
+			continue
+		var kind := str(rec.get("kind", rec.get("state", "")))
+		var remembered := str(_edge_override_kinds.get(key, ""))
+		if remembered != "" and remembered != kind:
+			ov.erase(key)
+			_edge_override_kinds.erase(key)
+			dirty = true
+	return dirty
+
+
+func _capture_dressed(plan: Dictionary) -> void:
+	_capture_dressed_layer("floors", plan.get("floor_placements", []), "cell_key")
+	_capture_dressed_layer("ceilings", plan.get("ceiling_placements", []), "cell_key")
+	var edge_items: Array = []
+	var edges: Variant = plan.get("edges", {})
+	if edges is Dictionary:
+		for k in edges:
+			var rec: Variant = edges[k]
+			if rec is Dictionary:
+				var d: Dictionary = (rec as Dictionary).duplicate(true)
+				d["edge_key"] = str(k)
+				edge_items.append(d)
+	elif edges is Array:
+		edge_items = edges
+	if edge_items.is_empty():
+		edge_items = plan.get("placements", [])
+	_capture_dressed_layer("edges", edge_items, "edge_key")
+
+
+func _capture_dressed_layer(ov_map: String, items: Variant, key_field: String) -> void:
+	if not (items is Array):
+		return
+	var ov: Dictionary = _module_overrides.get(ov_map, {})
+	var dressed: Dictionary = _dressed.get(ov_map, {})
+	var live: Dictionary = {}
+	for rec_v in items:
+		if not (rec_v is Dictionary):
+			continue
+		var rec: Dictionary = rec_v
+		var key := str(rec.get(key_field, rec.get("key", rec.get("cell_key", ""))))
+		if key.is_empty():
+			continue
+		if ov.has(key):
+			live[key] = str(dressed.get(key, rec.get("module_id", "")))
+		else:
+			live[key] = str(rec.get("module_id", ""))
+	_dressed[ov_map] = live

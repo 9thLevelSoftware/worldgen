@@ -34,6 +34,9 @@ var _prop_root: Node3D
 var _gltf_cache: Dictionary = {} # module_id or path -> Node prototype (not in tree)
 var _missing: Dictionary = {} # module_id or path -> true
 var _palettes: Dictionary = {}
+var _highlight_layer := ""
+var _highlight_key := ""
+var _highlight_mat: StandardMaterial3D
 var prop_glb_count := 0
 var prop_fallback_count := 0
 
@@ -172,6 +175,45 @@ func apply_props(props: Array, palettes: Dictionary = {}) -> void:
 	_apply_deck_fade()
 
 
+func highlight_selection(layer: String, key: String) -> void:
+	_highlight_layer = layer
+	_highlight_key = key
+	_apply_highlight()
+
+
+func _apply_highlight() -> void:
+	if _pieces == null:
+		return
+	for child in _pieces.get_children():
+		_set_highlight(child, _piece_is_selected(child))
+
+
+func _piece_is_selected(child: Node) -> bool:
+	if _highlight_key.is_empty():
+		return false
+	if _highlight_layer == "edge":
+		return str(child.get_meta("edge_key", "")) == _highlight_key
+	return str(child.get_meta("layer", "")) == _highlight_layer and str(child.get_meta("cell_key", "")) == _highlight_key
+
+
+func _highlight_material() -> StandardMaterial3D:
+	if _highlight_mat == null:
+		_highlight_mat = StandardMaterial3D.new()
+		_highlight_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_highlight_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		_highlight_mat.albedo_color = Color(1.0, 0.88, 0.35, 0.32)
+		_highlight_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	return _highlight_mat
+
+
+func _set_highlight(n: Node, selected: bool) -> void:
+	if n is GeometryInstance3D:
+		var gi := n as GeometryInstance3D
+		gi.material_overlay = _highlight_material() if selected else null
+	for c in n.get_children():
+		_set_highlight(c, selected)
+
+
 func _spawn_layer(items: Variant, layer: String, always: bool) -> void:
 	if not (items is Array):
 		return
@@ -196,6 +238,9 @@ func _spawn_layer(items: Variant, layer: String, always: bool) -> void:
 		node.set_meta("module_id", module_id)
 		node.set_meta("cell_key", str(rec.get("cell_key", "")))
 		node.set_meta("edge_key", str(rec.get("edge_key", rec.get("key", ""))))
+		node.set_meta("kind", str(rec.get("kind", rec.get("state", ""))))
+		node.set_meta("state", str(rec.get("state", rec.get("kind", ""))))
+		node.set_meta("portal", bool(rec.get("portal", false)))
 		_pieces.add_child(node)
 
 
@@ -516,6 +561,9 @@ func _apply_deck_fade() -> void:
 			elif deck < _active_deck:
 				alpha = 0.38
 			_set_fade(child, alpha)
+	# Overlay highlight is independent of transparency; re-apply so a deck
+	# switch cannot leave a stale overlay on rebuilt-or-faded instances.
+	_apply_highlight()
 
 
 func _set_fade(n: Node, alpha: float) -> void:
