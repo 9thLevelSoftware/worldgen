@@ -359,7 +359,10 @@ fn remap_stamp_keeps_floor_override_after_fragment_drift() {
             c.y += dy;
         }
     }
-    placed.topology.portals.retain(|p| p.exterior || p.to_room == NO_ROOM);
+    placed
+        .topology
+        .portals
+        .retain(|p| p.exterior || p.to_room == NO_ROOM);
     for p in &mut placed.topology.portals {
         if p.from_room == 1 {
             p.from_cell.x += dx;
