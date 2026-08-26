@@ -1,8 +1,18 @@
 class_name InspectorDock
 extends VBoxContainer
-## Selected room, portal, or vertical inspector.
+## Selected room, portal, vertical, prop, or compiled module inspector.
 
 const _LATTICE := preload("res://scripts/OccupancyLattice.gd")
+
+## validate.rs FLOOR_MODULES. Anything else on a floor is greyed + FloorBadModule.
+const FLOOR_MODULES: PackedStringArray = ["floor_1x1", "corridor_floor_1x1"]
+const GREYED_FLOOR_MODULES: PackedStringArray = [
+	"floor_2x1", "corridor_floor_1x2", "ramp_up_1x2", "pillar_support_1x1",
+]
+const HATCH_NOTE := "visual mismatch, legal id"
+const VERTEX_INNER := "wall_inner_corner"
+const VERTEX_OUTER := "wall_outer_corner"
+const VERTEX_T := "wall_t_junction"
 
 signal room_edited(room: Dictionary, vars: Dictionary)
 signal portal_edited(portal: Dictionary)
@@ -10,6 +20,8 @@ signal portal_removed
 signal vertical_removed
 signal prop_edited(prop: Dictionary)
 signal prop_removed
+signal module_override_set(ov_map: String, key: String, module_id: String)
+signal module_inspect_requested(sel: Dictionary)
 
 var _syncing := false
 var _room: Dictionary = {}
@@ -60,6 +72,18 @@ var _pr_locked: CheckBox
 var _pr_note: Label
 var _pr_remove: Button
 
+var _mod_fields: VBoxContainer
+var _mod_kind: Label
+var _mod_key: Label
+var _mod_current: Label
+var _mod_default: Label
+var _mod_note: Label
+var _mod_list: ItemList
+var _mod_grey_note: Label
+var _mod_alt: Button
+var _mod_sel: Dictionary = {}
+var _mod_ids: PackedStringArray = PackedStringArray()
+
 
 func _ready() -> void:
 	add_theme_constant_override("separation", 6)
@@ -69,7 +93,7 @@ func _ready() -> void:
 	add_child(title)
 
 	_empty = Label.new()
-	_empty.text = "Room list: inspect only. Paint: occupied click stamps+selects (re-click inspects). Portal: click A then a cardinal neighbor. Vertical: stacked occupied cells on N and N±1. Props: snap to compiled wall/center slots after compile OK. Delete removes the selected portal, vertical, or prop."
+	_empty.text = "Room list: inspect only. Paint: occupied click stamps+selects (re-click inspects). Portal: click A then a cardinal neighbor. Vertical: stacked occupied cells on N and N±1. Props: snap to compiled wall/center slots after compile OK. Assign module: click a compiled floor, wall, or portal. Delete removes the selected portal, vertical, or prop."
 	_empty.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	add_child(_empty)
 
@@ -182,6 +206,38 @@ func _ready() -> void:
 	_prop_fields.add_child(_pr_remove)
 	_prop_fields.visible = false
 
+	_mod_fields = VBoxContainer.new()
+	_mod_fields.add_theme_constant_override("separation", 6)
+	add_child(_mod_fields)
+	var mtitle := Label.new()
+	mtitle.text = "Module"
+	mtitle.theme_type_variation = "HeaderSmall"
+	_mod_fields.add_child(mtitle)
+	_mod_kind = _ro_line_in(_mod_fields, "selection")
+	_mod_key = _ro_line_in(_mod_fields, "key")
+	_mod_current = _ro_line_in(_mod_fields, "current")
+	_mod_default = _ro_line_in(_mod_fields, "default")
+	_mod_note = Label.new()
+	_mod_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_mod_note.modulate = Color(0.85, 0.85, 0.7)
+	_mod_fields.add_child(_mod_note)
+	_mod_list = ItemList.new()
+	_mod_list.custom_minimum_size = Vector2(0, 180)
+	_mod_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_mod_list.allow_reselect = true
+	_mod_list.item_selected.connect(_on_module_item_selected)
+	_mod_fields.add_child(_mod_list)
+	_mod_grey_note = Label.new()
+	_mod_grey_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_mod_grey_note.modulate = Color(0.7, 0.7, 0.72)
+	_mod_grey_note.visible = false
+	_mod_fields.add_child(_mod_grey_note)
+	_mod_alt = Button.new()
+	_mod_alt.visible = false
+	_mod_alt.pressed.connect(_on_mod_alt)
+	_mod_fields.add_child(_mod_alt)
+	_mod_fields.visible = false
+
 
 func bind_room(room: Dictionary, vars: Dictionary) -> void:
 	_room = room
@@ -189,9 +245,11 @@ func bind_room(room: Dictionary, vars: Dictionary) -> void:
 	_portal = {}
 	_vertical = {}
 	_prop = {}
+	_mod_sel = {}
 	_portal_fields.visible = false
 	_vert_fields.visible = false
 	_prop_fields.visible = false
+	_mod_fields.visible = false
 	if room.is_empty():
 		_empty.visible = true
 		_fields.visible = false
@@ -220,9 +278,11 @@ func bind_portal(portal: Dictionary) -> void:
 	_room = {}
 	_vertical = {}
 	_prop = {}
+	_mod_sel = {}
 	_fields.visible = false
 	_vert_fields.visible = false
 	_prop_fields.visible = false
+	_mod_fields.visible = false
 	if portal.is_empty():
 		_portal_fields.visible = false
 		_empty.visible = true
@@ -253,9 +313,11 @@ func bind_vertical(vertical: Dictionary) -> void:
 	_room = {}
 	_portal = {}
 	_prop = {}
+	_mod_sel = {}
 	_fields.visible = false
 	_portal_fields.visible = false
 	_prop_fields.visible = false
+	_mod_fields.visible = false
 	if vertical.is_empty():
 		_vert_fields.visible = false
 		_empty.visible = true
@@ -281,9 +343,11 @@ func bind_prop(prop: Dictionary) -> void:
 	_room = {}
 	_portal = {}
 	_vertical = {}
+	_mod_sel = {}
 	_fields.visible = false
 	_portal_fields.visible = false
 	_vert_fields.visible = false
+	_mod_fields.visible = false
 	if prop.is_empty():
 		_prop_fields.visible = false
 		_empty.visible = true
@@ -309,6 +373,157 @@ func bind_prop(prop: Dictionary) -> void:
 
 func clear() -> void:
 	bind_room({}, {})
+
+
+func bind_module(sel: Dictionary, legal: PackedStringArray) -> void:
+	_mod_sel = sel.duplicate(true)
+	_room = {}
+	_portal = {}
+	_vertical = {}
+	_prop = {}
+	_fields.visible = false
+	_portal_fields.visible = false
+	_vert_fields.visible = false
+	_prop_fields.visible = false
+	if sel.is_empty():
+		_mod_fields.visible = false
+		_empty.visible = true
+		return
+	_empty.visible = false
+	_mod_fields.visible = true
+	_syncing = true
+	var kind := str(sel.get("kind", ""))
+	var state := str(sel.get("state", ""))
+	_mod_kind.text = selection_caption(kind, state)
+	_mod_key.text = str(sel.get("key", ""))
+	var current := str(sel.get("module_id", ""))
+	_mod_current.text = current if not current.is_empty() else "(none)"
+	_mod_ids = merge_legal_ids(kind, legal, current)
+	var preferred := str(sel.get("default_id", ""))
+	if preferred.is_empty() and not _mod_ids.is_empty():
+		preferred = _mod_ids[0]
+	_mod_default.text = preferred if not preferred.is_empty() else "—"
+	_mod_note.text = module_note(sel)
+	_mod_note.visible = not _mod_note.text.is_empty()
+	_fill_module_list(kind, current)
+	_mod_grey_note.visible = kind == "floor"
+	if _mod_grey_note.visible:
+		_mod_grey_note.text = "Greyed ids are not in FLOOR_MODULES. Assigning writes the override so the GLB preview updates; validate returns FloorBadModule and export is refused."
+	var alt := str(sel.get("alt_label", ""))
+	_mod_alt.visible = not alt.is_empty()
+	_mod_alt.text = alt if not alt.is_empty() else ""
+	_syncing = false
+
+
+func has_module_selection() -> bool:
+	return not _mod_sel.is_empty()
+
+
+func module_selection() -> Dictionary:
+	return _mod_sel.duplicate(true)
+
+
+static func is_greyed_floor(module_id: String) -> bool:
+	return FLOOR_MODULES.find(module_id) < 0
+
+
+static func merge_legal_ids(kind: String, legal: PackedStringArray, current: String) -> PackedStringArray:
+	var out := PackedStringArray()
+	var seen: Dictionary = {}
+	for id in legal:
+		var s := str(id)
+		if s.is_empty() or seen.has(s):
+			continue
+		seen[s] = true
+		out.append(s)
+	if kind == "floor":
+		for id in GREYED_FLOOR_MODULES:
+			if seen.has(id):
+				continue
+			seen[id] = true
+			out.append(id)
+	if not current.is_empty() and not seen.has(current):
+		out.append(current)
+	return out
+
+
+static func module_note(sel: Dictionary) -> String:
+	var notes: PackedStringArray = PackedStringArray()
+	var kind := str(sel.get("kind", ""))
+	var state := str(sel.get("state", "")).to_upper()
+	if kind == "portal" and state == "HATCH":
+		notes.append(HATCH_NOTE)
+	if kind == "portal" and state == "BREACH":
+		notes.append("BREACH compiles with an empty module_id (no doorway mesh).")
+	var dressed := str(sel.get("dressed_id", ""))
+	var current := str(sel.get("module_id", ""))
+	var overridden := bool(sel.get("overridden", false))
+	if kind == "vertex" and overridden and not dressed.is_empty() and dressed != current:
+		notes.append("override disagrees with vertex-dressed %s" % dressed)
+	var extra := str(sel.get("note", ""))
+	if not extra.is_empty():
+		notes.append(extra)
+	return "\n".join(notes)
+
+
+static func selection_caption(kind: String, state: String) -> String:
+	match kind:
+		"floor":
+			return "Floor (%s)" % (state if not state.is_empty() else "cell")
+		"ceiling":
+			return "Ceiling"
+		"wall":
+			return "Solid wall"
+		"portal":
+			return "Portal %s" % (state if not state.is_empty() else "DOOR")
+		"vertex":
+			return "Vertex %s" % (state if not state.is_empty() else "")
+		_:
+			return kind
+
+
+func _fill_module_list(kind: String, current: String) -> void:
+	_mod_list.clear()
+	var select := -1
+	for id in _mod_ids:
+		var label := id
+		var greyed := kind == "floor" and is_greyed_floor(id)
+		if greyed:
+			label = "%s  (blocked)" % id
+		var i := _mod_list.add_item(label)
+		_mod_list.set_item_metadata(i, id)
+		if greyed:
+			_mod_list.set_item_custom_fg_color(i, Color(0.55, 0.55, 0.6))
+		if id == current:
+			select = i
+	if select >= 0:
+		_mod_list.select(select)
+
+
+func _on_module_item_selected(index: int) -> void:
+	if _syncing or _mod_sel.is_empty():
+		return
+	var id := str(_mod_list.get_item_metadata(index))
+	if id.is_empty():
+		return
+	var ov_map := str(_mod_sel.get("ov_map", ""))
+	var key := str(_mod_sel.get("key", ""))
+	if ov_map.is_empty() or key.is_empty():
+		return
+	_mod_sel["module_id"] = id
+	_mod_sel["overridden"] = true
+	_mod_current.text = id
+	_mod_note.text = module_note(_mod_sel)
+	_mod_note.visible = not _mod_note.text.is_empty()
+	module_override_set.emit(ov_map, key, id)
+
+
+func _on_mod_alt() -> void:
+	if _mod_sel.is_empty():
+		return
+	var alt: Variant = _mod_sel.get("alt", {})
+	if alt is Dictionary and not (alt as Dictionary).is_empty():
+		module_inspect_requested.emit((alt as Dictionary).duplicate(true))
 
 
 func _emit() -> void:
