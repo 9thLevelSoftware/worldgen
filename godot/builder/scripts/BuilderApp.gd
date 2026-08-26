@@ -352,8 +352,8 @@ func _run_compile() -> void:
 	var plan: Dictionary = result.get("plan", {})
 	_preview.set_active_deck(_lattice.active_deck)
 	_preview.apply_plan(plan)
-	# Hide occupancy CSG floors when kit floor GLBs cover the cells.
-	_lattice.set_occupancy_floors_visible(not _preview.has_kit_floor_glbs())
+	# Hide occupancy CSG floors only when every occupied cell has a floor GLB.
+	_lattice.set_occupancy_floors_visible(not _preview.covers_occupied_floors())
 	if issues.is_empty() and _issues.item_count > 0:
 		_issues.set_item_text(0, "Compile OK · %s" % _preview.status_text())
 	else:

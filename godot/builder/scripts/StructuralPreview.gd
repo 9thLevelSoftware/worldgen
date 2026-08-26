@@ -21,6 +21,7 @@ var fallback_count := 0
 var floor_glb_count := 0
 var wall_glb_count := 0
 var doorway_glb_count := 0
+var floor_placement_count := 0
 var missing_ids: PackedStringArray = PackedStringArray()
 ## True only when every placed piece loaded from a GLB (no CSG fallback).
 var claimed_kit_preview := false
@@ -74,11 +75,15 @@ func apply_plan(plan: Dictionary) -> void:
 	floor_glb_count = 0
 	wall_glb_count = 0
 	doorway_glb_count = 0
+	floor_placement_count = 0
 	missing_ids = PackedStringArray()
 	claimed_kit_preview = false
 	if plan.is_empty():
 		return
-	_spawn_layer(plan.get("floor_placements", []), "floor", true)
+	var floors: Variant = plan.get("floor_placements", [])
+	if floors is Array:
+		floor_placement_count = (floors as Array).size()
+	_spawn_layer(floors, "floor", true)
 	_spawn_layer(plan.get("ceiling_placements", []), "ceiling", true)
 	_spawn_layer(plan.get("placements", []), "edge", false)
 	_apply_deck_fade()
@@ -104,6 +109,17 @@ func has_kit_floor_glbs() -> bool:
 	return floor_glb_count > 0
 
 
+## Hide occupancy CSG floors only when every occupied cell has a floor GLB.
+func covers_occupied_floors() -> bool:
+	return floor_placement_count > 0 and floor_glb_count == floor_placement_count
+
+
+func piece_nodes() -> Array:
+	if _pieces == null:
+		return []
+	return _pieces.get_children()
+
+
 func _spawn_layer(items: Variant, layer: String, always: bool) -> void:
 	if not (items is Array):
 		return
@@ -126,6 +142,8 @@ func _spawn_layer(items: Variant, layer: String, always: bool) -> void:
 		node.set_meta("deck", _deck_of(rec))
 		node.set_meta("layer", layer)
 		node.set_meta("module_id", module_id)
+		node.set_meta("cell_key", str(rec.get("cell_key", "")))
+		node.set_meta("edge_key", str(rec.get("edge_key", rec.get("key", ""))))
 		_pieces.add_child(node)
 
 
@@ -133,10 +151,13 @@ func _make_piece(module_id: String, layer: String) -> Node3D:
 	var visual := _try_glb(module_id)
 	var from_glb := visual != null
 	if visual == null:
-		visual = _make_csg(_family(module_id, layer))
 		fallback_count += 1
 		if missing_ids.find(module_id) < 0:
 			missing_ids.append(module_id)
+		# Occupancy CSG already draws floors; skip a second CSG floor layer.
+		if layer == "floor":
+			return null
+		visual = _make_csg(_family(module_id, layer))
 	else:
 		glb_count += 1
 		match layer:
