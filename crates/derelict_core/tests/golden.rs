@@ -7,10 +7,16 @@
 //! UPDATE_GOLDEN=1 cargo test -p derelict_core --test golden
 //! ```
 
+use derelict_core::model::CauseOfLoss;
 use derelict_core::role::Role;
-use derelict_core::structural::export::{to_layout_json, ExportOptions};
+use derelict_core::structural::export::{to_gameplay_slice_json, to_layout_json, ExportOptions};
 use derelict_core::{GenData, GenParams};
 use std::fmt::Write as _;
+
+/// Compact shuttle + airlock_2x2 stamp; west attach matches this seed.
+const STAMP_SEED: u64 = 45;
+/// Same opt-in stamp, low intactness + depressurization so fracture remaps overrides.
+const STAMP_FRACTURE_SEED: u64 = 178;
 
 const CASES: &[(&str, u64, Option<u16>)] = &[
     ("shuttle", 1, None),
@@ -95,36 +101,27 @@ fn stamps_airlock_2x2_via_compile_authored() {
     let data = stamped_shuttle_data();
     let mut params = GenParams::new("shuttle");
     params.intactness_override = Some(10_000);
-
-    let mut stamped = None;
-    for seed in 1..48u64 {
-        let Ok(ship) = derelict_core::generate_ship(seed, &params, &data) else {
-            continue;
-        };
-        let Some(airlock) = ship.topology.rooms.iter().find(|r| r.role == Role::Airlock) else {
-            continue;
-        };
-        let has_override = airlock.cells.iter().any(|c| {
-            ship.plan
-                .occupancy
-                .get(&c.key())
-                .map(|rec| rec.module_id.as_str())
-                == Some("floor_1x1")
-        });
-        if airlock.cells.len() == 4 && has_override {
-            stamped = Some(ship);
-            break;
-        }
-    }
-    let ship = stamped.expect("airlock_2x2 should stamp onto a compact shuttle");
+    let ship = derelict_core::generate_ship(STAMP_SEED, &params, &data)
+        .expect("pinned compact shuttle stamp seed");
 
     let airlock = ship
         .topology
         .rooms
         .iter()
         .find(|r| r.role == Role::Airlock)
-        .unwrap();
+        .expect("stamped ship has an airlock");
     assert_eq!(airlock.cells.len(), 4, "golden occupancy is 2x2");
+    let has_override = airlock.cells.iter().any(|c| {
+        ship.plan
+            .occupancy
+            .get(&c.key())
+            .map(|rec| rec.module_id.as_str())
+            == Some("floor_1x1")
+    });
+    assert!(
+        has_override,
+        "compile_authored must keep floor_1x1 override"
+    );
 
     let locker = ship
         .entities
@@ -145,6 +142,51 @@ fn stamps_airlock_2x2_via_compile_authored() {
     assert_eq!(
         layout["hazard_source"], "runtime",
         "generated ships keep runtime hazard_source"
+    );
+    let slice = to_gameplay_slice_json(&ship);
+    let locker_row = slice["loot_containers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| {
+            c["kind"] == "suit_locker"
+                && c["approach_cell"]
+                    == serde_json::json!([locker.pos.x, locker.pos.y, locker.pos.deck])
+        })
+        .expect("authored locker in slice");
+    assert_eq!(locker_row["loot_table"], "authored_explicit");
+    assert_eq!(locker_row["contents"][0]["item_id"], "scrap_metal");
+    assert_eq!(locker_row["contents"][0]["qty"], 2);
+}
+
+#[test]
+fn stamp_overrides_survive_fracture_drift() {
+    let data = stamped_shuttle_data();
+    let mut params = GenParams::new("shuttle");
+    params.intactness_override = Some(600);
+    params.cause_override = Some(CauseOfLoss::Depressurization);
+    let ship = derelict_core::generate_ship(STAMP_FRACTURE_SEED, &params, &data)
+        .expect("pinned fracture stamp seed");
+    assert!(
+        ship.fractured,
+        "fixture must fracture so override keys remap"
+    );
+    let airlock = ship
+        .topology
+        .rooms
+        .iter()
+        .find(|r| r.role == Role::Airlock)
+        .expect("airlock survives fracture");
+    let has_override = airlock.cells.iter().any(|c| {
+        ship.plan
+            .occupancy
+            .get(&c.key())
+            .map(|rec| rec.module_id.as_str())
+            == Some("floor_1x1")
+    });
+    assert!(
+        has_override,
+        "floor_1x1 must sit on the (possibly drifted) airlock attach cell"
     );
 }
 

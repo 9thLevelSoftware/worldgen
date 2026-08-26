@@ -373,13 +373,15 @@ pub fn to_gameplay_slice_json_named(ship: &Ship, names: &BTreeMap<RoomId, String
         .filter(|e| e.kind == EntityKind::Container && !e.tags.iter().any(|t| t == "debris_field"))
         .filter_map(|e| {
             let room = room_at(e.pos.deck, e.pos.x, e.pos.y)?;
-            Some(json!({
+            let mut row = json!({
                 "id": format!("container_{}", e.id),
                 "kind": e.proto,
                 "room_id": name_of(room),
                 "approach_cell": [e.pos.x, e.pos.y, e.pos.deck],
                 "loot_table": "worldgen_seeded",
-            }))
+            });
+            overlay_authored_container(&mut row, e);
+            Some(row)
         })
         .collect();
 
@@ -784,6 +786,36 @@ fn room_stable_at(golden: &GoldenArea, cell: [i32; 3]) -> Option<String> {
         .iter()
         .find(|r| r.deck == deck && r.cells.iter().any(|c| c[0] == cell[0] && c[1] == cell[1]))
         .map(|r| r.stable_id.clone())
+}
+
+fn overlay_authored_container(row: &mut Value, e: &EntitySpec) {
+    if !e.tags.iter().any(|t| t == "authored_skip_loot") {
+        return;
+    }
+    let Some(obj) = row.as_object_mut() else {
+        return;
+    };
+    if let Some(table) = e
+        .tags
+        .iter()
+        .find_map(|t| t.strip_prefix("authored_loot_table:"))
+        .filter(|t| !t.is_empty())
+    {
+        obj.insert("loot_table".into(), json!(table));
+        return;
+    }
+    let contents: Vec<Value> = e
+        .tags
+        .iter()
+        .filter_map(|t| {
+            let rest = t.strip_prefix("content:")?;
+            let (item_id, qty) = rest.split_once(':')?;
+            let qty: u16 = qty.parse().ok()?;
+            Some(json!({ "item_id": item_id, "qty": qty }))
+        })
+        .collect();
+    obj.insert("loot_table".into(), json!("authored_explicit"));
+    obj.insert("contents".into(), Value::Array(contents));
 }
 
 fn apply_loot_overlay(obj: &mut Map<String, Value>, prop: &AuthoredProp) {

@@ -6,7 +6,7 @@
 //! projection → Ship. Every failure is typed; there is no best-effort ship.
 
 use crate::archetype::{GenData, ItemRegistry};
-use crate::authoring::{compile_authored, AuthoredProp, InventoryMode};
+use crate::authoring::{compile_authored, AuthoredProp, InventoryMode, StaleClass};
 use crate::model::*;
 use crate::rng::{self, roll_range, weighted_choice};
 use crate::stages::{damage, furnish, hull, loot, story};
@@ -15,7 +15,8 @@ use crate::structural::plan::{EdgeKind, RoomId as PlanRoomId, StructuralPlan, To
 use crate::structural::project::project_to_raster;
 use crate::structural::validate::{validate, ValidationPolicy, ValidationStage};
 use crate::topology::{
-    apply_golden_stamps, place_topology, residual_fill, RoleParams, TemplateDef,
+    apply_golden_stamps, place_topology, remap_stamp_for_drift, residual_fill, RoleParams,
+    TemplateDef,
 };
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -186,15 +187,19 @@ pub fn generate_ship_timed(
                 Ok(p) => p,
                 Err(e) => {
                     last_err = Some(GenError::TopologyFailed(e.to_string()));
-                    failed_templates.push(template.id.clone());
+                    if blacklist_template_on(TopologyFailKind::Placement) {
+                        failed_templates.push(template.id.clone());
+                    }
                     continue;
                 }
             };
         let stamped = match apply_golden_stamps(&mut candidate, &stamps, &hull_plan.deck_masks) {
             Ok(s) => s,
             Err(e) => {
-                // Fail this stamp+offset; keep the template in the pool.
                 last_err = Some(GenError::TopologyFailed(e.to_string()));
+                if blacklist_template_on(TopologyFailKind::Stamp) {
+                    failed_templates.push(template.id.clone());
+                }
                 continue;
             }
         };
@@ -286,10 +291,36 @@ pub fn generate_ship_timed(
             arch,
             &[placed.entry_room, placed.goal_room],
         );
-        let (mut plan2, _stale) =
-            compile_authored(&topo2, &DefaultModulePicker, &stamped.overrides);
+        let drift_of = fragment_drift_map(&outcome);
+        let (overrides, hazards) = match remap_stamp_for_drift(
+            &stamped.overrides,
+            &stamped.hazards,
+            &placed.topology,
+            &topo2,
+            &drift_of,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                last_err = Some(GenError::TopologyFailed(e));
+                continue;
+            }
+        };
+        let (mut plan2, stale) = compile_authored(&topo2, &DefaultModulePicker, &overrides);
         if !plan2.errors.is_empty() {
             last_err = Some(GenError::StructuralCompileFailed(plan2.errors.clone()));
+            continue;
+        }
+        if stale
+            .iter()
+            .any(|s| matches!(s.class, StaleClass::Floor | StaleClass::Ceiling))
+        {
+            last_err = Some(GenError::StructuralCompileFailed(
+                stale
+                    .iter()
+                    .filter(|s| matches!(s.class, StaleClass::Floor | StaleClass::Ceiling))
+                    .map(|s| format!("stale override {} {}", s.key, s.module_id))
+                    .collect(),
+            ));
             continue;
         }
         apply_overlays(&mut plan2, &outcome);
@@ -340,7 +371,15 @@ pub fn generate_ship_timed(
         );
         match validate(&plan2, &topo2, &policy) {
             Ok(_) => {
-                committed = Some((topo2, plan2, entities2, next_id2, outcome, critical_path));
+                committed = Some((
+                    topo2,
+                    plan2,
+                    entities2,
+                    next_id2,
+                    outcome,
+                    critical_path,
+                    hazards,
+                ));
                 break;
             }
             Err(issues) => {
@@ -376,7 +415,7 @@ pub fn generate_ship_timed(
             }
         }
     }
-    let (topology, plan, mut entities_final, _next_id, outcome, critical_path) = committed
+    let (topology, plan, mut entities_final, _next_id, outcome, critical_path, hazards) = committed
         .ok_or_else(|| GenError::RetriesExhausted {
             attempts: DAMAGE_ATTEMPTS,
             last: Box::new(last_err.unwrap_or(GenError::TopologyFailed("damage".into()))),
@@ -425,12 +464,35 @@ pub fn generate_ship_timed(
         damage_events: outcome.events,
         fractured: outcome.fractured,
         fragments,
-        hazard_overlay: stamped.hazards,
+        hazard_overlay: hazards,
     };
     Ok(GenReport {
         ship,
         stage_micros: timings,
     })
+}
+
+#[derive(Clone, Copy)]
+enum TopologyFailKind {
+    Placement,
+    Stamp,
+}
+
+/// Placement errors blacklist the template; stamp+offset errors do not.
+fn blacklist_template_on(kind: TopologyFailKind) -> bool {
+    matches!(kind, TopologyFailKind::Placement)
+}
+
+fn fragment_drift_map(outcome: &damage::DamageOutcome) -> BTreeMap<PlanRoomId, (i32, i32)> {
+    let mut drift_of_frag: BTreeMap<u8, (i32, i32)> = BTreeMap::new();
+    for f in &outcome.fragments {
+        drift_of_frag.insert(f.id, f.drift);
+    }
+    let mut out = BTreeMap::new();
+    for (room, frag) in &outcome.fragment_of {
+        out.insert(*room, drift_of_frag.get(frag).copied().unwrap_or((0, 0)));
+    }
+    out
 }
 
 /// Stamp cosmetic damage overlays (decals, damaged variants) onto the
@@ -574,11 +636,21 @@ fn authored_entity(prop: &AuthoredProp, id: u32, items: &ItemRegistry) -> Entity
         InventoryMode::LootTable | InventoryMode::Empty => Vec::new(),
     };
     let mut tags = vec!["authored_prop".into()];
-    if matches!(
-        prop.inventory_mode,
-        InventoryMode::Explicit | InventoryMode::LootTable
-    ) {
-        tags.push("authored_skip_loot".into());
+    match prop.inventory_mode {
+        InventoryMode::Explicit => {
+            tags.push("authored_skip_loot".into());
+            tags.push("authored_explicit".into());
+            for s in &prop.inventory {
+                tags.push(format!("content:{}:{}", s.item_id, s.qty));
+            }
+        }
+        InventoryMode::LootTable => {
+            tags.push("authored_skip_loot".into());
+            if let Some(table) = prop.loot_table.as_deref().filter(|t| !t.is_empty()) {
+                tags.push(format!("authored_loot_table:{table}"));
+            }
+        }
+        InventoryMode::Empty => {}
     }
     EntitySpec {
         id,
@@ -590,5 +662,16 @@ fn authored_entity(prop: &AuthoredProp, id: u32, items: &ItemRegistry) -> Entity
         open: false,
         inventory,
         tags,
+    }
+}
+
+#[cfg(test)]
+mod stamp_retry_tests {
+    use super::{blacklist_template_on, TopologyFailKind};
+
+    #[test]
+    fn stamp_errors_do_not_blacklist_templates() {
+        assert!(blacklist_template_on(TopologyFailKind::Placement));
+        assert!(!blacklist_template_on(TopologyFailKind::Stamp));
     }
 }

@@ -10,8 +10,7 @@
 //! retry — never a best-effort layout.
 
 use crate::authoring::{
-    compile_authored, AuthoredHazards, AuthoredProp, GoldenArea, InventoryMode, LinkZone,
-    ModuleOverrides,
+    compile_authored, AuthoredHazards, AuthoredProp, GoldenArea, LinkZone, ModuleOverrides,
 };
 use crate::rng::{roll_range, weighted_choice};
 use crate::role::Role;
@@ -1498,7 +1497,6 @@ pub struct StampApplication {
     pub overrides: ModuleOverrides,
     pub props: Vec<AuthoredProp>,
     pub skip_furnish: BTreeSet<(u8, i32, i32)>,
-    pub skip_loot: BTreeSet<(u8, i32, i32)>,
     pub hazards: AuthoredHazards,
 }
 
@@ -1525,12 +1523,6 @@ pub fn apply_golden_stamps(
                 for prop in &one.props {
                     let key = (prop_deck(prop), prop.cell[0], prop.cell[1]);
                     applied.skip_furnish.insert(key);
-                    match prop.inventory_mode {
-                        InventoryMode::Explicit | InventoryMode::LootTable => {
-                            applied.skip_loot.insert(key);
-                        }
-                        InventoryMode::Empty => {}
-                    }
                 }
                 applied.props.extend(one.props);
                 applied.hazards.fire_zones.extend(one.hazards.fire_zones);
@@ -1571,53 +1563,51 @@ fn stamp_one(
     if meta.attach_edges.is_empty() {
         return Ok(None);
     }
-    let compatible: BTreeSet<Role> = meta
-        .compatible_roles
-        .iter()
-        .filter_map(|s| Role::parse(s))
-        .collect();
+    let mut compatible = BTreeSet::new();
+    for s in &meta.compatible_roles {
+        let role = Role::parse(s).ok_or_else(|| TopoError::ZonePlacementFailed {
+            zone: golden.id.clone(),
+            detail: format!("unknown compatible role '{s}'"),
+        })?;
+        compatible.insert(role);
+    }
     if compatible.is_empty() {
         return Ok(None);
     }
-    let attach = &meta.attach_edges[0];
-    let Some(attach_dir) = Dir::parse(&attach.dir) else {
-        return Err(TopoError::ZonePlacementFailed {
+
+    let mut candidates: Vec<(RoomId, usize, Cell, Cell, Dir)> = Vec::new();
+    for attach in &meta.attach_edges {
+        let attach_dir = Dir::parse(&attach.dir).ok_or_else(|| TopoError::ZonePlacementFailed {
             zone: golden.id.clone(),
             detail: format!("unknown attach dir '{}'", attach.dir),
-        });
-    };
-    let attach_cell = cell_from_xyz(attach.cell).map_err(|d| TopoError::ZonePlacementFailed {
-        zone: golden.id.clone(),
-        detail: d,
-    })?;
-
-    let candidates: Vec<(RoomId, usize, Cell)> = placed
-        .topology
-        .rooms
-        .iter()
-        .filter(|r| compatible.contains(&r.role))
-        .flat_map(|r| {
-            placed
-                .topology
-                .portals
-                .iter()
-                .enumerate()
-                .filter_map(move |(pi, p)| {
-                    let (cell, dir) = portal_connection(p, r.id)?;
-                    if dir == attach_dir {
-                        Some((r.id, pi, cell))
-                    } else {
-                        None
-                    }
-                })
-        })
-        .collect();
+        })?;
+        let attach_cell =
+            cell_from_xyz(attach.cell).map_err(|d| TopoError::ZonePlacementFailed {
+                zone: golden.id.clone(),
+                detail: d,
+            })?;
+        for room in placed
+            .topology
+            .rooms
+            .iter()
+            .filter(|r| compatible.contains(&r.role))
+        {
+            for (pi, p) in placed.topology.portals.iter().enumerate() {
+                let Some((cell, dir)) = portal_connection(p, room.id) else {
+                    continue;
+                };
+                if dir == attach_dir {
+                    candidates.push((room.id, pi, cell, attach_cell, attach_dir));
+                }
+            }
+        }
+    }
     if candidates.is_empty() {
         return Ok(None);
     }
 
     let mut last_detail = String::from("no viable stamp offset");
-    for (target_id, portal_idx, conn) in candidates {
+    for (target_id, portal_idx, conn, attach_cell, attach_dir) in candidates {
         let dx = conn.x - attach_cell.x;
         let dy = conn.y - attach_cell.y;
         let dd = i32::from(conn.deck) - i32::from(attach_cell.deck);
@@ -1902,7 +1892,6 @@ fn apply_offset(
         overrides,
         props,
         skip_furnish: BTreeSet::new(),
-        skip_loot: BTreeSet::new(),
         hazards,
     })
 }
@@ -2140,6 +2129,168 @@ fn translate_edge_key(key: &str, dd: i32, dx: i32, dy: i32) -> Result<String, St
             Ok(format!("{}|v|{}|{}", deck, y + dy, min_x + dx))
         }
         _ => Err(format!("bad edge key '{key}'")),
+    }
+}
+
+/// Shift stamped override keys and hazard cells by per-room fragment drift
+/// after fracture. Keys whose pre-damage cell no longer exists are dropped;
+/// surviving remapped keys that miss the post-damage plan are a caller error.
+pub fn remap_stamp_for_drift(
+    overrides: &ModuleOverrides,
+    hazards: &AuthoredHazards,
+    pre: &Topology,
+    post: &Topology,
+    drift_of: &BTreeMap<RoomId, (i32, i32)>,
+) -> Result<(ModuleOverrides, AuthoredHazards), String> {
+    let pre_owner = occupancy_index(pre);
+    let post_owner = occupancy_index(post);
+    let drift_at = |deck: u8, x: i32, y: i32| -> (i32, i32) {
+        pre_owner
+            .get(&(deck, x, y))
+            .and_then(|id| drift_of.get(id))
+            .copied()
+            .unwrap_or((0, 0))
+    };
+    let keep_cell = |deck: u8, x: i32, y: i32| post_owner.contains_key(&(deck, x, y));
+
+    let mut out = ModuleOverrides::default();
+    for (k, v) in &overrides.floors {
+        let (deck, x, y) = parse_cell_key(k)?;
+        let (dx, dy) = drift_at(deck, x, y);
+        let nk = translate_cell_key(k, 0, dx, dy)?;
+        let (nd, nx, ny) = parse_cell_key(&nk)?;
+        if keep_cell(nd, nx, ny) {
+            out.floors.insert(nk, v.clone());
+        }
+    }
+    for (k, v) in &overrides.ceilings {
+        let (deck, x, y) = parse_cell_key(k)?;
+        let (dx, dy) = drift_at(deck, x, y);
+        let nk = translate_cell_key(k, 0, dx, dy)?;
+        let (nd, nx, ny) = parse_cell_key(&nk)?;
+        if keep_cell(nd, nx, ny) {
+            out.ceilings.insert(nk, v.clone());
+        }
+    }
+    for (k, v) in &overrides.edges {
+        let Some((dx, dy)) = edge_drift(k, &pre_owner, drift_of)? else {
+            continue;
+        };
+        let nk = translate_edge_key(k, 0, dx, dy)?;
+        out.edges.insert(nk, v.clone());
+    }
+
+    let shift_xyz = |xyz: [i32; 3]| -> Result<[i32; 3], String> {
+        let c = cell_from_xyz(xyz)?;
+        let (dx, dy) = drift_at(c.deck, c.x, c.y);
+        translate_xyz(xyz, 0, dx, dy)
+    };
+    let map_zone = |z: &LinkZone| -> Result<LinkZone, String> {
+        Ok(LinkZone {
+            id: z.id.clone(),
+            from_room: z.from_room.clone(),
+            to_room: z.to_room.clone(),
+            from_cell: shift_xyz(z.from_cell)?,
+            to_cell: shift_xyz(z.to_cell)?,
+            module_id: z.module_id.clone(),
+            kind: z.kind.clone(),
+            compartment_id: z.compartment_id.clone(),
+            rationale: z.rationale.clone(),
+        })
+    };
+    let hazards = AuthoredHazards {
+        source: hazards.source.clone(),
+        fire_zones: hazards
+            .fire_zones
+            .iter()
+            .map(map_zone)
+            .collect::<Result<_, _>>()?,
+        breach_zones: hazards
+            .breach_zones
+            .iter()
+            .map(map_zone)
+            .collect::<Result<_, _>>()?,
+        arc_zones: hazards
+            .arc_zones
+            .iter()
+            .map(map_zone)
+            .collect::<Result<_, _>>()?,
+        radiation_zones: hazards
+            .radiation_zones
+            .iter()
+            .map(map_zone)
+            .collect::<Result<_, _>>()?,
+    };
+    Ok((out, hazards))
+}
+
+fn parse_cell_key(key: &str) -> Result<(u8, i32, i32), String> {
+    let mut parts = key.split('|');
+    let deck: i32 = parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| format!("bad cell key '{key}'"))?;
+    let x: i32 = parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| format!("bad cell key '{key}'"))?;
+    let y: i32 = parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| format!("bad cell key '{key}'"))?;
+    let deck = u8::try_from(deck).map_err(|_| format!("deck {deck} out of range"))?;
+    Ok((deck, x, y))
+}
+
+fn edge_drift(
+    key: &str,
+    pre_owner: &BTreeMap<(u8, i32, i32), RoomId>,
+    drift_of: &BTreeMap<RoomId, (i32, i32)>,
+) -> Result<Option<(i32, i32)>, String> {
+    let parts: Vec<&str> = key.split('|').collect();
+    if parts.len() != 4 {
+        return Err(format!("bad edge key '{key}'"));
+    }
+    let deck: u8 = parts[0]
+        .parse()
+        .map_err(|_| format!("bad edge key '{key}'"))?;
+    let mut drifts: Vec<(i32, i32)> = Vec::new();
+    let push = |x: i32, y: i32, drifts: &mut Vec<(i32, i32)>| {
+        if let Some(id) = pre_owner.get(&(deck, x, y)) {
+            drifts.push(drift_of.get(id).copied().unwrap_or((0, 0)));
+        }
+    };
+    match parts[1] {
+        "h" => {
+            let min_y: i32 = parts[2]
+                .parse()
+                .map_err(|_| format!("bad edge key '{key}'"))?;
+            let x: i32 = parts[3]
+                .parse()
+                .map_err(|_| format!("bad edge key '{key}'"))?;
+            push(x, min_y, &mut drifts);
+            push(x, min_y + 1, &mut drifts);
+        }
+        "v" => {
+            let y: i32 = parts[2]
+                .parse()
+                .map_err(|_| format!("bad edge key '{key}'"))?;
+            let min_x: i32 = parts[3]
+                .parse()
+                .map_err(|_| format!("bad edge key '{key}'"))?;
+            push(min_x, y, &mut drifts);
+            push(min_x + 1, y, &mut drifts);
+        }
+        _ => return Err(format!("bad edge key '{key}'")),
+    }
+    if drifts.is_empty() {
+        return Ok(None);
+    }
+    let first = drifts[0];
+    if drifts.iter().all(|d| *d == first) {
+        Ok(Some(first))
+    } else {
+        Ok(None)
     }
 }
 

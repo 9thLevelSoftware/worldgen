@@ -10,7 +10,8 @@ use derelict_core::structural::compile::{compile, DefaultModulePicker};
 use derelict_core::structural::plan::{Cell, EdgeKind, PortalIntent, RoomSpec, Topology, NO_ROOM};
 use derelict_core::structural::validate::{validate, ValidationPolicy};
 use derelict_core::topology::{
-    apply_golden_stamps, place_topology, PlacedTopology, RoleParams, TemplateSet,
+    apply_golden_stamps, place_topology, remap_stamp_for_drift, PlacedTopology, RoleParams,
+    TemplateSet,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -272,7 +273,6 @@ fn stamp_airlock_2x2_translates_and_keeps_overrides() {
     assert!(applied.overrides.floors.values().any(|m| m == "floor_1x1"));
     assert_eq!(applied.props.len(), 1);
     assert!(applied.skip_furnish.contains(&(0, 4, 3)));
-    assert!(applied.skip_loot.contains(&(0, 4, 3)));
 
     let (plan, _stale) =
         compile_authored(&placed.topology, &DefaultModulePicker, &applied.overrides);
@@ -295,4 +295,104 @@ fn stamp_skips_incompatible_roles() {
     let applied = apply_golden_stamps(&mut placed, &[&golden], &masks).unwrap();
     assert!(applied.overrides.floors.is_empty());
     assert!(applied.props.is_empty());
+}
+
+#[test]
+fn stamp_unknown_compatible_role_is_fail_closed() {
+    let mut golden = airlock_2x2();
+    golden.stamp.as_mut().unwrap().compatible_roles = vec!["Airlock".into()];
+    let (mut placed, masks) = west_airlock_placed();
+    let err = apply_golden_stamps(&mut placed, &[&golden], &masks).unwrap_err();
+    assert!(err.to_string().contains("unknown compatible role"), "{err}");
+}
+
+#[test]
+fn stamp_tries_attach_edges_beyond_first() {
+    let mut golden = airlock_2x2();
+    let meta = golden.stamp.as_mut().unwrap();
+    meta.attach_edges.insert(
+        0,
+        derelict_core::authoring::AttachEdge {
+            cell: [0, 0, 0],
+            dir: "north".into(),
+        },
+    );
+    let (mut placed, masks) = west_airlock_placed();
+    let applied = apply_golden_stamps(&mut placed, &[&golden], &masks).unwrap();
+    assert!(
+        applied.overrides.floors.values().any(|m| m == "floor_1x1"),
+        "second west attach_edge must still stamp"
+    );
+}
+
+#[test]
+fn stamp_overlap_is_topology_error() {
+    let golden = airlock_2x2();
+    let (mut placed, masks) = west_airlock_placed();
+    placed.topology.rooms[0].cells = vec![Cell::new(0, 4, 2)];
+    placed.topology.rooms.push(RoomSpec {
+        id: 3,
+        role: Role::Storage,
+        deck: 0,
+        cells: vec![Cell::new(0, 5, 2), Cell::new(0, 4, 3), Cell::new(0, 5, 3)],
+    });
+    let err = apply_golden_stamps(&mut placed, &[&golden], &masks).unwrap_err();
+    assert!(
+        err.to_string().contains("overlap") || err.to_string().contains("stamp"),
+        "{err}"
+    );
+}
+
+#[test]
+fn remap_stamp_keeps_floor_override_after_fragment_drift() {
+    let golden = airlock_2x2();
+    let (mut placed, masks) = west_airlock_placed();
+    let applied = apply_golden_stamps(&mut placed, &[&golden], &masks).unwrap();
+    let pre = placed.topology.clone();
+    let (dx, dy) = (3, 1);
+    for room in &mut placed.topology.rooms {
+        if room.id != 1 {
+            continue;
+        }
+        for c in &mut room.cells {
+            c.x += dx;
+            c.y += dy;
+        }
+    }
+    placed.topology.portals.retain(|p| p.exterior || p.to_room == NO_ROOM);
+    for p in &mut placed.topology.portals {
+        if p.from_room == 1 {
+            p.from_cell.x += dx;
+            p.from_cell.y += dy;
+        }
+        if p.to_room == 1 || p.from_room == 1 {
+            p.to_cell.x += dx;
+            p.to_cell.y += dy;
+        }
+    }
+    let drift_of = BTreeMap::from([(1, (dx, dy))]);
+    let (overrides, _hazards) = remap_stamp_for_drift(
+        &applied.overrides,
+        &applied.hazards,
+        &pre,
+        &placed.topology,
+        &drift_of,
+    )
+    .unwrap();
+    let (plan, stale) = compile_authored(&placed.topology, &DefaultModulePicker, &overrides);
+    assert!(plan.errors.is_empty(), "{:?}", plan.errors);
+    assert!(
+        !stale
+            .iter()
+            .any(|s| s.key.contains('|') && s.module_id == "floor_1x1"),
+        "floor override must not go stale after drift: {stale:?}"
+    );
+    let drifted_attach = Cell::new(0, 4 + dx, 2 + dy);
+    assert_eq!(
+        plan.occupancy
+            .get(&drifted_attach.key())
+            .map(|r| r.module_id.as_str()),
+        Some("floor_1x1"),
+        "floor_1x1 must sit on the drifted attach cell"
+    );
 }
