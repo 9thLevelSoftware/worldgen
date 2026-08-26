@@ -213,6 +213,9 @@ func stamp_portal_state(state: String) -> void:
 	if PORTAL_STATES.find(state) < 0:
 		return
 	active_portal_state = state
+	# Pending first-click is arming a new portal; do not restamp the last inspect.
+	if _has_pending:
+		return
 	if _selected_kind != "portal" or _selected_portal < 0 or _selected_portal >= _portals.size():
 		return
 	var portal: Dictionary = _portals[_selected_portal]
@@ -281,15 +284,28 @@ func cancel_pending() -> void:
 
 func stamp_role(role: String) -> void:
 	active_role = role
+	# Role palette is a room stamp. Drop portal/vertical selection so the
+	# inspector and Delete/Backspace match the highlighted room.
+	var converted := _selected_kind == "portal" or _selected_kind == "vertical"
+	if converted:
+		_selected_kind = "room"
+		_selected_portal = -1
+		_selected_vertical = -1
 	var room := get_selected()
 	if room.is_empty():
+		if converted:
+			_sync_links()
+			room_selected.emit({})
 		return
-	if str(room["role"]) == role:
+	var changed := str(room["role"]) != role
+	if not changed and not converted:
 		return
-	room["role"] = role
+	if changed:
+		room["role"] = role
 	_sync_floors()
 	_sync_links()
-	occupancy_changed.emit()
+	if changed:
+		occupancy_changed.emit()
 	room_selected.emit(room)
 
 
@@ -902,8 +918,7 @@ func _try_lmb_portal(cell: Vector3i) -> void:
 			_refresh_ghost()
 			return
 		if _occupancy.has(_key(cell)):
-			_pending_cell = cell
-			_sync_pending_anchor()
+			_begin_pending(cell)
 			hover_info.emit("portal from (%d,%d) deck %d — click cardinal neighbor" % [
 				cell.x, cell.y, cell.z
 			])
@@ -917,9 +932,7 @@ func _try_lmb_portal(cell: Vector3i) -> void:
 	if not _occupancy.has(_key(cell)):
 		hover_info.emit("blocked: portal start must be occupied")
 		return
-	_has_pending = true
-	_pending_cell = cell
-	_sync_pending_anchor()
+	_begin_pending(cell)
 	hover_info.emit("portal from (%d,%d) deck %d — click cardinal neighbor" % [
 		cell.x, cell.y, cell.z
 	])
@@ -939,24 +952,24 @@ func _try_lmb_vertical(cell: Vector3i) -> void:
 			_refresh_ghost()
 			return
 		if _occupancy.has(_key(cell)):
-			_pending_cell = cell
-			_sync_pending_anchor()
+			_begin_pending(cell)
 			hover_info.emit("vertical from (%d,%d) deck %d — click same (x,y) on deck ±1" % [
 				cell.x, cell.y, cell.z
 			])
 			return
 		hover_info.emit(reason)
 		return
-	var existing := _find_vertical_touching(cell)
-	if existing >= 0:
-		_select_vertical(existing)
-		return
 	if not _occupancy.has(_key(cell)):
 		hover_info.emit("blocked: vertical start must be occupied")
 		return
-	_has_pending = true
-	_pending_cell = cell
-	_sync_pending_anchor()
+	# A stacked neighbor without a vertical can start a new shaft even when
+	# this cell already participates in another opening.
+	if not _has_unlinked_vertical_neighbor(cell):
+		var existing := _find_vertical_touching(cell)
+		if existing >= 0:
+			_select_vertical(existing)
+			return
+	_begin_pending(cell)
 	hover_info.emit("vertical from (%d,%d) deck %d — click same (x,y) on deck ±1" % [
 		cell.x, cell.y, cell.z
 	])
@@ -1108,6 +1121,18 @@ func _find_vertical_touching(cell: Vector3i) -> int:
 	return -1
 
 
+func _has_unlinked_vertical_neighbor(cell: Vector3i) -> bool:
+	for dz in [-1, 1]:
+		var n := Vector3i(cell.x, cell.y, cell.z + dz)
+		if n.z < 0 or n.z >= MAX_DECKS:
+			continue
+		if not _occupancy.has(_key(n)):
+			continue
+		if _find_vertical(cell, n) < 0:
+			return true
+	return false
+
+
 func _portal_index_near(cell: Vector3i, hit: Vector3) -> int:
 	var lx := hit.x - float(cell.x) * CELL_SIZE_M
 	var lz := hit.z - float(cell.y) * CELL_SIZE_M
@@ -1217,6 +1242,22 @@ func _cancel_pending() -> void:
 	_sync_pending_anchor()
 
 
+## First click of a two-click tool. Drops portal/vertical inspect so the
+## state palette cannot restamp the previous selection.
+func _begin_pending(cell: Vector3i) -> void:
+	_has_pending = true
+	_pending_cell = cell
+	_selected_kind = "room"
+	_selected_portal = -1
+	_selected_vertical = -1
+	if _occupancy.has(_key(cell)):
+		_selected_id = int(_occupancy[_key(cell)])
+	_sync_pending_anchor()
+	_sync_floors()
+	_sync_links()
+	room_selected.emit(get_selected())
+
+
 func _sync_pending_anchor() -> void:
 	if _anchor == null:
 		return
@@ -1304,14 +1345,16 @@ func _update_vertical_ghost(cell: Vector3i) -> void:
 			ok = "select existing vertical"
 		_place_cell_ghost(cell, reason, ok)
 		return
-	if _find_vertical_touching(cell) >= 0:
-		_ghost.visible = false
-		hover_info.emit("select vertical opening")
+	if not _occupancy.has(_key(cell)):
+		_place_cell_ghost(cell, "blocked: vertical start must be occupied", "")
 		return
-	if _occupancy.has(_key(cell)):
-		_place_cell_ghost(cell, "", "vertical from (%d,%d) deck %d — click N±1" % [cell.x, cell.y, cell.z])
-		return
-	_place_cell_ghost(cell, "blocked: vertical start must be occupied", "")
+	if not _has_unlinked_vertical_neighbor(cell):
+		var existing := _find_vertical_touching(cell)
+		if existing >= 0:
+			_ghost.visible = false
+			hover_info.emit("select vertical opening")
+			return
+	_place_cell_ghost(cell, "", "vertical from (%d,%d) deck %d — click N±1" % [cell.x, cell.y, cell.z])
 
 
 func _cell_xyz(cell: Vector3i) -> Array:
