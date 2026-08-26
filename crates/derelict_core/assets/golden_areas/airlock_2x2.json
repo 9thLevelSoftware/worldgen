@@ -1,0 +1,75 @@
+{
+  "schema_version": "1.0.0",
+  "document_kind": "golden_area",
+  "id": "airlock_2x2",
+  "display_name": "Airlock 2x2",
+  "scope": "room",
+  "kit_id": "ship_structural_v0",
+  "cell_size_m": 4.0,
+  "deck_height_m": 4.0,
+  "entry_room": "airlock_01",
+  "goal_room": "airlock_01",
+  "topology": {
+    "rooms": [
+      {
+        "id": 1,
+        "stable_id": "airlock_01",
+        "role": "airlock",
+        "deck": 0,
+        "cells": [[0, 0], [1, 0], [0, 1], [1, 1]]
+      }
+    ],
+    "portals": [
+      {
+        "from_room": 1,
+        "to_room": 0,
+        "from_cell": [0, 0, 0],
+        "to_cell": [-1, 0, 0],
+        "state": "DOOR",
+        "exterior": true
+      }
+    ],
+    "verticals": []
+  },
+  "module_overrides": {
+    "floors": { "0|0|0": "floor_1x1", "0|1|0": "corridor_floor_1x1" },
+    "ceilings": {},
+    "edges": { "0|v|0|-1": "doorway_frame_open_1x1" }
+  },
+  "props": [
+    {
+      "id": 1,
+      "kind": "Container",
+      "proto": "suit_locker",
+      "visual_id": "generic_locker",
+      "cell": [0, 1, 0],
+      "rotation": 2,
+      "facing": "east",
+      "locked": false,
+      "inventory_mode": "explicit",
+      "inventory": [{ "item_id": "scrap_metal", "qty": 2 }],
+      "loot_table": null
+    }
+  ],
+  "room_vars": {
+    "1": {
+      "oxygen_bp": 8500,
+      "depressurized": false,
+      "vented": false,
+      "radiation_bp": 0,
+      "temperature_c": 18,
+      "notes": ""
+    }
+  },
+  "hazards": {
+    "source": "authored",
+    "fire_zones": [],
+    "breach_zones": [],
+    "arc_zones": [],
+    "radiation_zones": []
+  },
+  "stamp": {
+    "compatible_roles": ["airlock", "dock"],
+    "attach_edges": [{ "cell": [0, 0, 0], "dir": "west" }]
+  }
+}

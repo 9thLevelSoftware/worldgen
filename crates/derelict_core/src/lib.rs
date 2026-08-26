@@ -6,6 +6,7 @@
 //! and `GENERATOR_VERSION` produce byte-identical ships on any platform.
 
 pub mod archetype;
+pub mod authoring;
 pub mod model;
 pub mod pipeline;
 pub mod rng;
@@ -25,6 +26,10 @@ pub use model::{
 /// The model's serialized field is kept as a legacy compatibility detail; all
 /// new engine-facing entry points use this exported contract version.
 pub const GENERATOR_VERSION: u32 = 2;
+pub use authoring::{
+    apply_module_overrides, compile_authored, AuthoredHazards, AuthoredProp, GoldenArea, LinkZone,
+    ModuleOverrides, RoomVars, TopologyDto,
+};
 pub use pipeline::{generate_ship, generate_ship_timed, GenError, GenReport};
 pub use role::Role;
 pub use stages::hull::derive_site_seed;
