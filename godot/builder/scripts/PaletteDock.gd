@@ -135,6 +135,39 @@ static func is_wall_adjacent(entry: Dictionary) -> bool:
 	return bool(entry.get("wall_adjacent", false))
 
 
+static func allowed_rotations(entry: Dictionary) -> Array[int]:
+	var yaws = entry.get("allowed_yaw_deg", [])
+	if not (yaws is Array) or (yaws as Array).is_empty():
+		return [0, 1, 2, 3]
+	var out: Array[int] = []
+	for y in yaws as Array:
+		var rot := posmod(int(round(float(y) / 90.0)), 4)
+		if not out.has(rot):
+			out.append(rot)
+	if out.is_empty():
+		return [0, 1, 2, 3]
+	out.sort()
+	return out
+
+
+static func clamp_rotation(entry: Dictionary, rot: int) -> int:
+	var allowed := allowed_rotations(entry)
+	var r := posmod(rot, 4)
+	if allowed.has(r):
+		return r
+	return allowed[0]
+
+
+static func next_rotation(entry: Dictionary, rot: int, reverse: bool) -> int:
+	var allowed := allowed_rotations(entry)
+	var r := posmod(rot, 4)
+	var idx := allowed.find(r)
+	if idx < 0:
+		return allowed[0]
+	var delta := -1 if reverse else 1
+	return allowed[posmod(idx + delta, allowed.size())]
+
+
 static func is_stand_in(entry: Dictionary) -> bool:
 	if bool(entry.get("stand_in", false)):
 		return true
@@ -339,6 +372,7 @@ func _visual_entries(bucket: String) -> Array:
 			"albedo": "",
 			"surface": surface,
 			"slot": slot,
+			"allowed_yaw_deg": rec.get("allowed_yaw_deg", []),
 		})
 	return out
 

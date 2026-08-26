@@ -418,15 +418,14 @@ func prop_index_at(cell: Vector3i) -> int:
 
 
 func cycle_prop_rotation(reverse: bool = false) -> bool:
-	var delta := -1 if reverse else 1
 	if _selected_kind == "prop" and _selected_prop >= 0 and _selected_prop < _props.size():
 		var prop: Dictionary = _props[_selected_prop]
-		prop["rotation"] = posmod(int(prop.get("rotation", 0)) + delta, 4)
+		prop["rotation"] = _PALETTE.next_rotation(prop, int(prop.get("rotation", 0)), reverse)
 		props_changed.emit()
 		prop_selected.emit(_prop_dto(prop))
 		return true
 	if active_tool == TOOL_PROP and not _armed_prop.is_empty():
-		_rotation_offset = posmod(_rotation_offset + delta, 4)
+		_rotation_offset = _PALETTE.next_rotation(_armed_prop, _rotation_offset, reverse)
 		_refresh_ghost()
 		return true
 	return false
@@ -441,7 +440,7 @@ func apply_prop_edit(edited: Dictionary) -> void:
 	if edited.has("rotation"):
 		var rot := int(edited["rotation"])
 		if rot >= 0 and rot <= 3:
-			prop["rotation"] = rot
+			prop["rotation"] = _PALETTE.clamp_rotation(prop, rot)
 	props_changed.emit()
 	prop_selected.emit(_prop_dto(prop))
 
@@ -1768,7 +1767,7 @@ func _place_prop(cell: Vector3i, entry: Dictionary) -> void:
 		"proto": proto,
 		"visual_id": visual,
 		"cell": _cell_xyz(cell),
-		"rotation": posmod(base_rot + _rotation_offset, 4),
+		"rotation": _PALETTE.clamp_rotation(entry, base_rot + _rotation_offset),
 		"facing": facing if facing != "" else null,
 		"locked": false,
 		"inventory_mode": "empty",
@@ -1781,6 +1780,7 @@ func _place_prop(cell: Vector3i, entry: Dictionary) -> void:
 		"albedo": str(entry.get("albedo", "")),
 		"place": str(entry.get("place", "")),
 		"group": str(entry.get("group", "")),
+		"allowed_yaw_deg": entry.get("allowed_yaw_deg", []),
 	}
 	_next_prop_id += 1
 	_props.append(prop)
@@ -1810,7 +1810,12 @@ func _prop_block_reason(cell: Vector3i, entry: Dictionary) -> String:
 	var wall_adj := _PALETTE.is_wall_adjacent(entry)
 	if wall_adj and not _wall_slots.has(key):
 		return "blocked: wall-adjacent proto refuses center slots"
-	if not _wall_slots.has(key) and not _center_slots.has(key):
+	var place := str(entry.get("place", "Free"))
+	var room_id := int(_occupancy[key])
+	if place == "Center" and _room_has_center_slots(room_id):
+		if not _center_slots.has(key):
+			return "blocked: Center proto requires a center slot"
+	elif not _wall_slots.has(key) and not _center_slots.has(key):
 		return "blocked: not a wall or center slot"
 	var need_role := str(entry.get("role", ""))
 	if not need_role.is_empty():
@@ -1818,6 +1823,13 @@ func _prop_block_reason(cell: Vector3i, entry: Dictionary) -> String:
 		if have != need_role:
 			return "blocked: proto is for %s, cell is %s" % [need_role, have]
 	return ""
+
+
+func _room_has_center_slots(room_id: int) -> bool:
+	for key in _center_slots:
+		if int(_occupancy.get(key, 0)) == room_id:
+			return true
+	return false
 
 
 func _facing_for(cell: Vector3i, hit: Vector3) -> String:
