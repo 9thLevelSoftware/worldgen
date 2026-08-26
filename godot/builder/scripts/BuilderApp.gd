@@ -376,12 +376,15 @@ func _show_issues(issues: Array) -> void:
 func _apply_preview_banner() -> void:
 	if author == null or _content_offline:
 		return
+	var root_errors := _banner_label.text.begins_with("Content root loaded with errors")
 	if _preview.claimed_kit_preview:
-		if _banner_label.text.begins_with("Content root loaded with errors"):
+		if root_errors:
 			return
 		_banner.visible = false
 		return
 	if _preview.fallback_count == 0:
+		return
+	if root_errors:
 		return
 	_banner.visible = true
 	_banner_label.text = "CSG fallback: %s. Not claiming kit preview." % _preview.status_text()
