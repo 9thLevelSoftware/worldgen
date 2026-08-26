@@ -1,6 +1,6 @@
 class_name InspectorDock
 extends VBoxContainer
-## Selected room, portal, vertical, prop, or compiled module inspector.
+## Selected room, portal, vertical, prop, compiled module, or hazard inspector.
 
 const _LATTICE := preload("res://scripts/OccupancyLattice.gd")
 
@@ -22,6 +22,8 @@ signal prop_edited(prop: Dictionary)
 signal prop_removed
 signal module_override_set(ov_map: String, key: String, module_id: String)
 signal module_inspect_requested(sel: Dictionary)
+signal hazard_edited(zone: Dictionary)
+signal hazard_removed
 
 var _syncing := false
 var _room: Dictionary = {}
@@ -29,10 +31,12 @@ var _vars: Dictionary = {}
 var _portal: Dictionary = {}
 var _vertical: Dictionary = {}
 var _prop: Dictionary = {}
+var _hazard: Dictionary = {}
 var _fields: VBoxContainer
 var _portal_fields: VBoxContainer
 var _vert_fields: VBoxContainer
 var _prop_fields: VBoxContainer
+var _hazard_fields: VBoxContainer
 
 var _id_label: Label
 var _stable: LineEdit
@@ -71,6 +75,19 @@ var _pr_facing: Label
 var _pr_locked: CheckBox
 var _pr_note: Label
 var _pr_remove: Button
+var _atm_note: Label
+var _cid_label: Label
+
+var _h_id: Label
+var _h_kind: Label
+var _h_from: Label
+var _h_to: Label
+var _h_cells: Label
+var _h_cid: Label
+var _h_module: LineEdit
+var _h_rationale: LineEdit
+var _h_note: Label
+var _h_remove: Button
 
 var _mod_fields: VBoxContainer
 var _mod_kind: Label
@@ -93,7 +110,7 @@ func _ready() -> void:
 	add_child(title)
 
 	_empty = Label.new()
-	_empty.text = "Room list: inspect only. Paint: occupied click stamps+selects (re-click inspects). Portal: click A then a cardinal neighbor. Vertical: stacked occupied cells on N and N±1. Props: snap to compiled wall/center slots after compile OK. Assign module: click a compiled floor, wall, or portal. Delete removes the selected portal, vertical, or prop."
+	_empty.text = "Room list: inspect only. Paint: occupied click stamps+selects (re-click inspects). Portal: click A then a cardinal neighbor. Vertical: stacked occupied cells on N and N±1. Props: snap to compiled wall/center slots after compile OK. Assign module: click a compiled floor, wall, or portal. Hazards: click two cells or a portal edge (re-click inspects). Delete removes the selected portal, vertical, prop, or hazard."
 	_empty.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	add_child(_empty)
 
@@ -119,14 +136,23 @@ func _ready() -> void:
 	vars_title.theme_type_variation = "HeaderSmall"
 	_fields.add_child(vars_title)
 
+	var atm := Label.new()
+	atm.text = "Compartment atmosphere (bp) — not player tank"
+	atm.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_fields.add_child(atm)
 	_oxygen = _spin("oxygen_bp", 0, 65535, 8500)
 	_depress = _check("depressurized")
 	_vented = _check("vented")
 	_rad = _spin("radiation_bp", 0, 65535, 0)
 	_temp = _spin("temperature_c", -273, 500, 18)
+	_cid_label = _ro_line("compartment")
 	_notes = _edit_line("notes")
 	_notes.text_submitted.connect(func(_t: String) -> void: _emit())
 	_notes.focus_exited.connect(_emit)
+	_atm_note = Label.new()
+	_atm_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_atm_note.modulate = Color(0.85, 0.85, 0.7)
+	_fields.add_child(_atm_note)
 
 	_fields.visible = false
 
@@ -238,6 +264,39 @@ func _ready() -> void:
 	_mod_fields.add_child(_mod_alt)
 	_mod_fields.visible = false
 
+	_hazard_fields = VBoxContainer.new()
+	_hazard_fields.add_theme_constant_override("separation", 6)
+	add_child(_hazard_fields)
+	var htitle := Label.new()
+	htitle.text = "Hazard zone"
+	htitle.theme_type_variation = "HeaderSmall"
+	_hazard_fields.add_child(htitle)
+	_h_id = _ro_line_in(_hazard_fields, "id")
+	_h_kind = _ro_line_in(_hazard_fields, "kind")
+	_h_from = _ro_line_in(_hazard_fields, "from_room")
+	_h_to = _ro_line_in(_hazard_fields, "to_room")
+	_h_cells = _ro_line_in(_hazard_fields, "cells")
+	_h_cells.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_h_cid = _ro_line_in(_hazard_fields, "compartment")
+	_h_module = LineEdit.new()
+	_h_module.placeholder_text = "optional"
+	_h_module.text_submitted.connect(func(_t: String) -> void: _emit_hazard())
+	_h_module.focus_exited.connect(_emit_hazard)
+	_labeled_in(_hazard_fields, "module_id", _h_module)
+	_h_rationale = LineEdit.new()
+	_h_rationale.text_submitted.connect(func(_t: String) -> void: _emit_hazard())
+	_h_rationale.focus_exited.connect(_emit_hazard)
+	_labeled_in(_hazard_fields, "rationale", _h_rationale)
+	_h_note = Label.new()
+	_h_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_h_note.modulate = Color(0.85, 0.85, 0.7)
+	_hazard_fields.add_child(_h_note)
+	_h_remove = Button.new()
+	_h_remove.text = "Remove hazard"
+	_h_remove.pressed.connect(func() -> void: hazard_removed.emit())
+	_hazard_fields.add_child(_h_remove)
+	_hazard_fields.visible = false
+
 
 func bind_room(room: Dictionary, vars: Dictionary) -> void:
 	_room = room
@@ -246,10 +305,12 @@ func bind_room(room: Dictionary, vars: Dictionary) -> void:
 	_vertical = {}
 	_prop = {}
 	_mod_sel = {}
+	_hazard = {}
 	_portal_fields.visible = false
 	_vert_fields.visible = false
 	_prop_fields.visible = false
 	_mod_fields.visible = false
+	_hazard_fields.visible = false
 	if room.is_empty():
 		_empty.visible = true
 		_fields.visible = false
@@ -266,11 +327,13 @@ func bind_room(room: Dictionary, vars: Dictionary) -> void:
 	_cells.text = _format_cells(room.get("cells", []))
 	_oxygen.set_value_no_signal(int(vars.get("oxygen_bp", 8500)))
 	_depress.set_pressed_no_signal(bool(vars.get("depressurized", false)))
-	_vented.set_pressed_no_signal(bool(vars.get("vented", false)))
 	_rad.set_value_no_signal(int(vars.get("radiation_bp", 0)))
 	_temp.set_value_no_signal(int(vars.get("temperature_c", 18)))
 	_notes.text = str(vars.get("notes", ""))
+	_apply_atmosphere_honesty(role, vars)
 	_syncing = false
+	if _LATTICE.compartment_for_role(role).is_empty() and bool(vars.get("vented", false)):
+		_emit()
 
 
 func bind_portal(portal: Dictionary) -> void:
@@ -279,10 +342,12 @@ func bind_portal(portal: Dictionary) -> void:
 	_vertical = {}
 	_prop = {}
 	_mod_sel = {}
+	_hazard = {}
 	_fields.visible = false
 	_vert_fields.visible = false
 	_prop_fields.visible = false
 	_mod_fields.visible = false
+	_hazard_fields.visible = false
 	if portal.is_empty():
 		_portal_fields.visible = false
 		_empty.visible = true
@@ -314,10 +379,12 @@ func bind_vertical(vertical: Dictionary) -> void:
 	_portal = {}
 	_prop = {}
 	_mod_sel = {}
+	_hazard = {}
 	_fields.visible = false
 	_portal_fields.visible = false
 	_prop_fields.visible = false
 	_mod_fields.visible = false
+	_hazard_fields.visible = false
 	if vertical.is_empty():
 		_vert_fields.visible = false
 		_empty.visible = true
@@ -344,10 +411,12 @@ func bind_prop(prop: Dictionary) -> void:
 	_portal = {}
 	_vertical = {}
 	_mod_sel = {}
+	_hazard = {}
 	_fields.visible = false
 	_portal_fields.visible = false
 	_vert_fields.visible = false
 	_mod_fields.visible = false
+	_hazard_fields.visible = false
 	if prop.is_empty():
 		_prop_fields.visible = false
 		_empty.visible = true
@@ -371,6 +440,52 @@ func bind_prop(prop: Dictionary) -> void:
 	_syncing = false
 
 
+func bind_hazard(zone: Dictionary) -> void:
+	_hazard = zone.duplicate(true)
+	_room = {}
+	_portal = {}
+	_vertical = {}
+	_prop = {}
+	_mod_sel = {}
+	if _fields == null or _hazard_fields == null:
+		return
+	_fields.visible = false
+	_portal_fields.visible = false
+	_vert_fields.visible = false
+	_prop_fields.visible = false
+	if _mod_fields:
+		_mod_fields.visible = false
+	if zone.is_empty():
+		_hazard_fields.visible = false
+		_empty.visible = true
+		return
+	_empty.visible = false
+	_hazard_fields.visible = true
+	_syncing = true
+	_h_id.text = str(zone.get("id", ""))
+	_h_kind.text = str(zone.get("kind", ""))
+	_h_from.text = str(zone.get("from_room", ""))
+	_h_to.text = str(zone.get("to_room", ""))
+	_h_cells.text = "%s → %s" % [
+		_format_xyz(zone.get("from_cell", [])),
+		_format_xyz(zone.get("to_cell", [])),
+	]
+	var cid := str(zone.get("compartment_id", ""))
+	_h_cid.text = cid if cid != "" else "—"
+	_h_module.text = str(zone.get("module_id", ""))
+	_h_rationale.text = str(zone.get("rationale", ""))
+	_h_note.text = _hazard_honesty(cid)
+	_syncing = false
+
+
+func hazard_honesty_text(compartment_id: String) -> String:
+	return _hazard_honesty(compartment_id)
+
+
+func atmosphere_honesty_text(role: String) -> String:
+	return _atmosphere_honesty(role)
+
+
 func clear() -> void:
 	bind_room({}, {})
 
@@ -381,10 +496,13 @@ func bind_module(sel: Dictionary, legal: PackedStringArray) -> void:
 	_portal = {}
 	_vertical = {}
 	_prop = {}
+	_hazard = {}
 	_fields.visible = false
 	_portal_fields.visible = false
 	_vert_fields.visible = false
 	_prop_fields.visible = false
+	if _hazard_fields:
+		_hazard_fields.visible = false
 	if sel.is_empty():
 		_mod_fields.visible = false
 		_empty.visible = true
@@ -540,15 +658,56 @@ func _emit() -> void:
 	var next_room := _room.duplicate(true)
 	next_room["stable_id"] = _stable.text.strip_edges()
 	next_room["role"] = role
+	var mapped := _LATTICE.compartment_for_role(role)
+	var vented := _vented.button_pressed
+	if mapped.is_empty():
+		vented = false
+		_vented.set_pressed_no_signal(false)
 	var next_vars := {
 		"oxygen_bp": int(_oxygen.value),
 		"depressurized": _depress.button_pressed,
-		"vented": _vented.button_pressed,
+		"vented": vented,
 		"radiation_bp": int(_rad.value),
 		"temperature_c": int(_temp.value),
 		"notes": _notes.text,
 	}
+	_apply_atmosphere_honesty(role, next_vars)
 	room_edited.emit(next_room, next_vars)
+
+
+func _emit_hazard() -> void:
+	if _syncing or _hazard.is_empty():
+		return
+	var next_zone := _hazard.duplicate(true)
+	next_zone["module_id"] = _h_module.text.strip_edges()
+	next_zone["rationale"] = _h_rationale.text
+	_hazard = next_zone
+	hazard_edited.emit(next_zone)
+
+
+func _apply_atmosphere_honesty(role: String, vars: Dictionary) -> void:
+	var cid := _LATTICE.compartment_for_role(role)
+	_cid_label.text = cid if cid != "" else "—"
+	_atm_note.text = _atmosphere_honesty(role)
+	if cid.is_empty():
+		_vented.disabled = true
+		_vented.set_pressed_no_signal(false)
+	else:
+		_vented.disabled = false
+		_vented.set_pressed_no_signal(bool(vars.get("vented", false)))
+
+
+func _atmosphere_honesty(role: String) -> String:
+	var cid := _LATTICE.compartment_for_role(role)
+	if cid.is_empty():
+		return "preview only — no hull compartment. v1 markers do not ignite, vent, or change suit O2."
+	return "On a boarded derelict, suit O2 always drains (field_atmosphere). This slider is hull/compartment state for mapped roles (bridge, engineering, cargo). hydroponics is a loader alias the builder cannot stamp. v1 preview/export only — no live ignite."
+
+
+func _hazard_honesty(compartment_id: String) -> String:
+	if compartment_id.strip_edges().is_empty():
+		return "Preview/export marker only — no live ignite. Preview only — no hull compartment."
+	return "Preview/export marker only — no live ignite. Layout overlay is link-shaped; runtime ignition is a later follow-up."
 
 
 func _emit_prop() -> void:

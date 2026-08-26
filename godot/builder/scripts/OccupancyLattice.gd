@@ -1,7 +1,8 @@
 class_name OccupancyLattice
 extends Node3D
 ## 3D occupancy lattice (not a TileMapLayer). Cells snap to CELL_SIZE_M.
-## Occupancy paint/erase plus click-click portals and stacked verticals.
+## Occupancy paint/erase plus click-click portals, stacked verticals, and
+## link-shaped hazard zones (loader from_cell/to_cell overlays).
 
 signal occupancy_changed
 signal room_selected(room: Dictionary)
@@ -10,6 +11,8 @@ signal vertical_selected(vertical: Dictionary)
 signal prop_selected(prop: Dictionary)
 signal props_changed
 signal piece_selected(sel: Dictionary)
+signal hazard_selected(zone: Dictionary)
+signal hazards_changed
 signal deck_changed(deck: int)
 signal hover_info(text: String)
 signal tool_changed(tool: String)
@@ -40,9 +43,42 @@ const TOOL_PORTAL := "portal"
 const TOOL_VERTICAL := "vertical"
 const TOOL_PROP := "prop"
 const TOOL_ASSET := "asset"
+const TOOL_HAZARD := "hazard"
 
 ## EdgeKind::name() portal states only (not SOLID/OPEN).
 const PORTAL_STATES: PackedStringArray = ["DOOR", "LOCKED", "HATCH", "BREACH"]
+
+## Loader LinkZone.kind vocabulary. One shape for every overlay type.
+const HAZARD_KINDS: PackedStringArray = [
+	"timed_fire", "hull_breach", "electrical_arc", "radiation",
+]
+
+const HAZARD_BUCKET := {
+	"timed_fire": "fire_zones",
+	"hull_breach": "breach_zones",
+	"electrical_arc": "arc_zones",
+	"radiation": "radiation_zones",
+}
+
+const HAZARD_COLORS := {
+	"timed_fire": Color(1.0, 0.62, 0.14),
+	"hull_breach": Color(0.95, 0.22, 0.20),
+	"electrical_arc": Color(0.12, 0.86, 0.95),
+	"radiation": Color(0.55, 0.95, 0.22),
+}
+
+## playable_generated_ship.gd COMPARTMENT_FOR_ROLE. Unmapped roles stay visual.
+## hydroponics/cockpit/engine_bay are loader aliases; the role palette cannot stamp hydroponics.
+const COMPARTMENT_FOR_ROLE := {
+	"bridge": "bridge",
+	"cockpit": "bridge",
+	"engineering": "engineering",
+	"reactor": "engineering",
+	"engine_bay": "engineering",
+	"hydroponics": "hydroponics",
+	"cargo": "cargo",
+	"storage": "cargo",
+}
 
 const STATE_COLORS := {
 	"DOOR": Color(0.25, 0.85, 0.95),
@@ -80,19 +116,23 @@ var active_deck: int = 0
 var deck_count: int = 1
 var active_tool: String = TOOL_PAINT
 var active_portal_state: String = "DOOR"
+var active_hazard_kind: String = "timed_fire"
 
 var _rooms: Array[Dictionary] = []
 var _occupancy: Dictionary = {} # "deck|x|y" -> room id
 var _portals: Array[Dictionary] = []
 var _verticals: Array[Dictionary] = []
 var _props: Array[Dictionary] = []
+var _hazards: Array[Dictionary] = []
 var _selected_id: int = 0
 var _selected_kind: String = "room"
 var _selected_portal: int = -1
 var _selected_vertical: int = -1
 var _selected_prop: int = -1
+var _selected_hazard: int = -1
 var _next_id: int = 1
 var _next_prop_id: int = 1
+var _next_hazard_serial: int = 1
 var _armed_prop: Dictionary = {}
 var _prop_ready := false
 var _show_slots := false
@@ -112,6 +152,8 @@ var _floor_boxes: Dictionary = {} # "deck|x|y" -> CSGBox3D
 var _links: Node3D
 var _portal_boxes: Dictionary = {}
 var _vertical_boxes: Dictionary = {}
+var _hazard_root: Node3D
+var _hazard_boxes: Dictionary = {}
 var _slots: Node3D
 var _slot_boxes: Dictionary = {}
 var _grid: MeshInstance3D
@@ -190,6 +232,55 @@ func get_selected_prop() -> Dictionary:
 
 func get_armed_prop() -> Dictionary:
 	return _armed_prop.duplicate(true)
+
+
+func get_hazards() -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	for h in _hazards:
+		out.append(_hazard_dto(h))
+	return out
+
+
+func get_hazards_dto() -> Dictionary:
+	var buckets := {
+		"fire_zones": [],
+		"breach_zones": [],
+		"arc_zones": [],
+		"radiation_zones": [],
+	}
+	for h in _hazards:
+		var rec := _hazard_dto(h)
+		var key := str(HAZARD_BUCKET.get(str(rec.get("kind", "")), ""))
+		if key.is_empty() or not buckets.has(key):
+			continue
+		(buckets[key] as Array).append(rec)
+	return {
+		"source": "authored",
+		"fire_zones": buckets["fire_zones"],
+		"breach_zones": buckets["breach_zones"],
+		"arc_zones": buckets["arc_zones"],
+		"radiation_zones": buckets["radiation_zones"],
+	}
+
+
+func get_selected_hazard() -> Dictionary:
+	if _selected_kind == "hazard" and _selected_hazard >= 0 and _selected_hazard < _hazards.size():
+		return _hazard_dto(_hazards[_selected_hazard])
+	return {}
+
+
+func hazard_nodes() -> Array:
+	if _hazard_root == null:
+		return []
+	return _hazard_root.get_children()
+
+
+static func compartment_for_role(role: String) -> String:
+	return str(COMPARTMENT_FOR_ROLE.get(role, ""))
+
+
+static func hazard_kind_legal(kind: String) -> bool:
+	return HAZARD_KINDS.find(kind) >= 0
 
 
 func is_prop_ready() -> bool:
@@ -275,8 +366,13 @@ func cancel_pointer() -> void:
 	_panning = false
 	_orbiting = false
 	_paint_drag = false
+	_has_pending = false
 	_has_last_screen = false
 	hide_ghost()
+
+
+func has_pending_click() -> bool:
+	return _has_pending
 
 
 ## Arm a new room; the RoomSpec is created on the next successful void paint.
@@ -288,6 +384,7 @@ func create_room() -> void:
 	_selected_vertical = -1
 	_selected_prop = -1
 	_asset_sel = {}
+	_selected_hazard = -1
 	_sync_floors()
 	_sync_links()
 	room_selected.emit({})
@@ -295,7 +392,7 @@ func create_room() -> void:
 
 ## Re-applying the same tool still resets the pending click (plain buttons).
 func set_tool(tool: String) -> void:
-	if tool != TOOL_PAINT and tool != TOOL_PORTAL and tool != TOOL_VERTICAL and tool != TOOL_PROP and tool != TOOL_ASSET:
+	if tool != TOOL_PAINT and tool != TOOL_PORTAL and tool != TOOL_VERTICAL and tool != TOOL_PROP and tool != TOOL_ASSET and tool != TOOL_HAZARD:
 		return
 	active_tool = tool
 	_cancel_pending()
@@ -355,6 +452,14 @@ func stamp_portal_state(state: String) -> void:
 	portal_selected.emit(portal.duplicate(true))
 
 
+func stamp_hazard_kind(kind: String) -> void:
+	if not hazard_kind_legal(kind):
+		return
+	# Arm only. Re-click inspects without restamping an existing overlay;
+	# a different kind on the same link is a second LinkZone.
+	active_hazard_kind = kind
+
+
 func apply_portal_edit(edited: Dictionary) -> void:
 	if _selected_kind != "portal" or _selected_portal < 0 or _selected_portal >= _portals.size():
 		return
@@ -376,8 +481,11 @@ func remove_selected_portal() -> void:
 	_portals.remove_at(_selected_portal)
 	_selected_portal = -1
 	_selected_kind = "room"
+	var hz_pruned := _prune_hazards()
 	_sync_links()
 	occupancy_changed.emit()
+	if hz_pruned:
+		hazards_changed.emit()
 	_emit_selection()
 
 
@@ -402,7 +510,60 @@ func remove_selected_link() -> bool:
 	if _selected_kind == "prop":
 		remove_selected_prop()
 		return true
+	if _selected_kind == "hazard":
+		remove_selected_hazard()
+		return true
 	return false
+
+
+func remove_selected_hazard() -> void:
+	if _selected_kind != "hazard" or _selected_hazard < 0 or _selected_hazard >= _hazards.size():
+		return
+	_hazards.remove_at(_selected_hazard)
+	_selected_hazard = -1
+	_selected_kind = "room"
+	_sync_hazards()
+	hazards_changed.emit()
+	_emit_selection()
+
+
+## Test/UI helper: one lattice click. Pending first click is not a DTO row.
+func try_hazard_click(cell: Vector3i, hit: Vector3 = Vector3.ZERO) -> bool:
+	if hit != Vector3.ZERO:
+		_last_hit = hit
+	var before := _hazards.size()
+	var sel := _selected_hazard
+	_try_lmb_hazard(cell)
+	return _hazards.size() != before or (_selected_kind == "hazard" and _selected_hazard != sel)
+
+
+## Test helper: commit a portal between two cells.
+func try_place_portal(a: Vector3i, b: Vector3i) -> bool:
+	_commit_portal(a, b)
+	return _selected_kind == "portal"
+
+
+## Test helper: commit a two-cell link. Re-click of the same kind inspects.
+func try_place_hazard(a: Vector3i, b: Vector3i) -> bool:
+	var before := _hazards.size()
+	_commit_hazard(a, b)
+	return _selected_kind == "hazard" and (_hazards.size() > before or _selected_hazard >= 0)
+
+
+func apply_hazard_edit(edited: Dictionary) -> void:
+	if _selected_kind != "hazard" or _selected_hazard < 0 or _selected_hazard >= _hazards.size():
+		return
+	var zone: Dictionary = _hazards[_selected_hazard]
+	if edited.has("rationale"):
+		zone["rationale"] = str(edited["rationale"])
+	if edited.has("module_id"):
+		zone["module_id"] = str(edited["module_id"])
+	if edited.has("kind") and hazard_kind_legal(str(edited["kind"])):
+		zone["kind"] = str(edited["kind"])
+		active_hazard_kind = str(edited["kind"])
+	_sync_hazards()
+	hazards_changed.emit()
+	hazard_selected.emit(_hazard_dto(zone))
 
 
 func remove_selected_prop() -> void:
@@ -477,15 +638,16 @@ func cancel_pending() -> void:
 
 func stamp_role(role: String) -> void:
 	active_role = role
-	# Role palette is a room stamp. Drop portal/vertical/prop/module selection so the
+	# Role palette is a room stamp. Drop portal/vertical/prop/module/hazard selection so the
 	# inspector and Delete/Backspace match the highlighted room.
-	var converted := _selected_kind == "portal" or _selected_kind == "vertical" or _selected_kind == "prop" or _selected_kind == "piece"
+	var converted := _selected_kind == "portal" or _selected_kind == "vertical" or _selected_kind == "prop" or _selected_kind == "piece" or _selected_kind == "hazard"
 	if converted:
 		_selected_kind = "room"
 		_selected_portal = -1
 		_selected_vertical = -1
 		_selected_prop = -1
 		_asset_sel = {}
+		_selected_hazard = -1
 	var room := get_selected()
 	if room.is_empty():
 		if converted:
@@ -497,10 +659,13 @@ func stamp_role(role: String) -> void:
 		return
 	if changed:
 		room["role"] = role
+	var hz_changed := _refresh_hazard_rooms()
 	_sync_floors()
 	_sync_links()
 	if changed:
 		occupancy_changed.emit()
+	if hz_changed:
+		hazards_changed.emit()
 	room_selected.emit(room)
 
 
@@ -515,9 +680,12 @@ func apply_room_edit(edited: Dictionary) -> void:
 		var role := str(edited.get("role", ""))
 		if not role.is_empty():
 			r["role"] = role
+		var hz_changed := _refresh_hazard_rooms()
 		_sync_floors()
 		_sync_links()
 		occupancy_changed.emit()
+		if hz_changed:
+			hazards_changed.emit()
 		room_selected.emit(r)
 		return
 
@@ -530,6 +698,7 @@ func select_room_id(id: int) -> void:
 	_selected_vertical = -1
 	_selected_prop = -1
 	_asset_sel = {}
+	_selected_hazard = -1
 	_sync_floors()
 	_sync_links()
 	room_selected.emit(get_selected())
@@ -609,6 +778,9 @@ func handle_gui_input(event: InputEvent, viewport: SubViewport) -> void:
 				if active_tool == TOOL_PROP:
 					if not remove_prop_at(c):
 						hover_info.emit("no prop on (%d,%d) deck %d" % [c.x, c.y, c.z])
+				elif active_tool == TOOL_HAZARD:
+					if not _erase_hazard_at(c):
+						hover_info.emit("no hazard on (%d,%d) deck %d" % [c.x, c.y, c.z])
 				elif active_tool == TOOL_ASSET:
 					pass
 				elif _has_pending and not _occupancy.has(_key(c)):
@@ -637,7 +809,7 @@ func handle_gui_input(event: InputEvent, viewport: SubViewport) -> void:
 		_update_ghost(c)
 		if _lmb and _paint_drag and active_tool == TOOL_PAINT:
 			_try_paint(c)
-		elif _rmb and active_tool != TOOL_PROP and active_tool != TOOL_ASSET:
+		elif _rmb and active_tool != TOOL_PROP and active_tool != TOOL_ASSET and active_tool != TOOL_HAZARD:
 			_erase_cell(c)
 
 
@@ -678,6 +850,10 @@ func _build_world() -> void:
 	_links = Node3D.new()
 	_links.name = "Links"
 	add_child(_links)
+
+	_hazard_root = Node3D.new()
+	_hazard_root.name = "Hazards"
+	add_child(_hazard_root)
 
 	_slots = Node3D.new()
 	_slots.name = "Slots"
@@ -791,6 +967,9 @@ func _try_lmb(cell: Vector3i) -> bool:
 		TOOL_ASSET:
 			_try_lmb_asset(cell)
 			return false
+		TOOL_HAZARD:
+			_try_lmb_hazard(cell)
+			return false
 		_:
 			return _try_lmb_paint(cell)
 
@@ -834,11 +1013,15 @@ func _try_paint(cell: Vector3i) -> bool:
 	_selected_vertical = -1
 	_selected_prop = -1
 	_asset_sel = {}
+	_selected_hazard = -1
 	_prune_links()
+	var hz_pruned := _prune_hazards()
 	_sync_deck_count()
 	_sync_floors()
 	_sync_links()
 	occupancy_changed.emit()
+	if hz_pruned:
+		hazards_changed.emit()
 	room_selected.emit(room)
 	return true
 
@@ -881,11 +1064,14 @@ func _erase_cell(cell: Vector3i) -> void:
 	_rooms = leftover
 	_prune_links()
 	var pruned := _prune_props()
+	var hz_pruned := _prune_hazards()
 	_sync_floors()
 	_sync_links()
 	occupancy_changed.emit()
 	if pruned:
 		props_changed.emit()
+	if hz_pruned:
+		hazards_changed.emit()
 	_emit_selection()
 
 
@@ -926,6 +1112,8 @@ func _stamp_room_id(id: int, role: String) -> bool:
 		if str(r["role"]) == role:
 			return false
 		r["role"] = role
+		if _refresh_hazard_rooms():
+			hazards_changed.emit()
 		return true
 	return false
 
@@ -1035,6 +1223,8 @@ func _update_ghost(cell: Vector3i) -> void:
 			_update_prop_ghost(cell)
 		TOOL_ASSET:
 			_update_asset_ghost(cell)
+		TOOL_HAZARD:
+			_update_hazard_ghost(cell)
 		_:
 			_update_paint_ghost(cell)
 
@@ -1070,6 +1260,7 @@ func _try_lmb_asset(cell: Vector3i) -> void:
 	var sel := pick_compiled_at(cell, _last_hit)
 	if sel.is_empty():
 		_asset_sel = {}
+		_selected_hazard = -1
 		_selected_kind = "room"
 		hover_info.emit("no compiled floor/wall/portal here")
 		room_selected.emit({})
@@ -1092,6 +1283,7 @@ func _apply_asset_sel(sel: Dictionary) -> void:
 	_selected_portal = int(sel.get("portal_index", -1))
 	_selected_vertical = -1
 	_selected_prop = -1
+	_selected_hazard = -1
 	if sel.get("ov_map", "") == "floors" or sel.get("ov_map", "") == "ceilings":
 		var key := str(sel.get("key", ""))
 		if _occupancy.has(key):
@@ -1398,6 +1590,8 @@ func _commit_portal(a: Vector3i, b: Vector3i) -> void:
 	_selected_kind = "portal"
 	_selected_portal = _portals.size() - 1
 	_selected_vertical = -1
+	_selected_prop = -1
+	_selected_hazard = -1
 	_selected_id = from_room
 	_sync_floors()
 	_sync_links()
@@ -1421,6 +1615,8 @@ func _commit_vertical(a: Vector3i, b: Vector3i) -> void:
 	_selected_kind = "vertical"
 	_selected_vertical = _verticals.size() - 1
 	_selected_portal = -1
+	_selected_prop = -1
+	_selected_hazard = -1
 	_selected_id = from_room
 	_sync_floors()
 	_sync_links()
@@ -1441,6 +1637,8 @@ func _select_portal(index: int, may_stamp: bool) -> void:
 	_selected_kind = "portal"
 	_selected_portal = index
 	_selected_vertical = -1
+	_selected_prop = -1
+	_selected_hazard = -1
 	_selected_id = int(_portals[index]["from_room"])
 	_sync_floors()
 	_sync_links()
@@ -1455,6 +1653,8 @@ func _select_vertical(index: int) -> void:
 	_selected_kind = "vertical"
 	_selected_vertical = index
 	_selected_portal = -1
+	_selected_prop = -1
+	_selected_hazard = -1
 	_selected_id = int(_verticals[index]["from_room"])
 	_sync_floors()
 	_sync_links()
@@ -1643,11 +1843,15 @@ func _emit_selection() -> void:
 		if not _asset_sel.is_empty():
 			piece_selected.emit(_asset_sel.duplicate(true))
 			return
+	if _selected_kind == "hazard" and _selected_hazard >= 0 and _selected_hazard < _hazards.size():
+		hazard_selected.emit(_hazard_dto(_hazards[_selected_hazard]))
+		return
 	_selected_kind = "room"
 	_selected_portal = -1
 	_selected_vertical = -1
 	_selected_prop = -1
 	_asset_sel = {}
+	_selected_hazard = -1
 	room_selected.emit(get_selected())
 
 
@@ -1657,7 +1861,7 @@ func _cancel_pending() -> void:
 	_sync_pending_anchor()
 
 
-## First click of a two-click tool. Drops portal/vertical inspect so the
+## First click of a two-click tool. Drops portal/vertical/hazard inspect so the
 ## state palette cannot restamp the previous selection.
 func _begin_pending(cell: Vector3i) -> void:
 	_has_pending = true
@@ -1667,6 +1871,7 @@ func _begin_pending(cell: Vector3i) -> void:
 	_selected_vertical = -1
 	_selected_prop = -1
 	_asset_sel = {}
+	_selected_hazard = -1
 	if _occupancy.has(_key(cell)):
 		_selected_id = int(_occupancy[_key(cell)])
 	_sync_pending_anchor()
@@ -1776,6 +1981,518 @@ func _update_vertical_ghost(cell: Vector3i) -> void:
 	_place_cell_ghost(cell, "", "vertical from (%d,%d) deck %d — click N±1" % [cell.x, cell.y, cell.z])
 
 
+func _try_lmb_hazard(cell: Vector3i) -> void:
+	if _has_pending:
+		if cell == _pending_cell:
+			_cancel_pending()
+			_refresh_ghost()
+			hover_info.emit("hazard cancelled")
+			return
+		var reason := _hazard_block_reason(_pending_cell, cell)
+		if reason == "":
+			_commit_hazard(_pending_cell, cell)
+			_cancel_pending()
+			_refresh_ghost()
+			return
+		if _occupancy.has(_key(cell)):
+			_begin_pending(cell)
+			hover_info.emit("%s from (%d,%d) deck %d — click cardinal neighbor or portal edge" % [
+				active_hazard_kind, cell.x, cell.y, cell.z
+			])
+			return
+		hover_info.emit(reason)
+		return
+	var portal_idx := _portal_index_near(cell, _last_hit)
+	if portal_idx >= 0:
+		_commit_hazard_from_portal(portal_idx)
+		return
+	var existing := _hazard_index_near(cell, _last_hit)
+	if existing >= 0:
+		var hz: Dictionary = _hazards[existing]
+		if str(hz.get("kind", "")) == active_hazard_kind:
+			_select_hazard(existing, false)
+			return
+		# Different kind on this link: second overlay, same endpoints as portal path.
+		_commit_hazard(_xyz_cell(hz["from_cell"]), _xyz_cell(hz["to_cell"]))
+		return
+	if not _occupancy.has(_key(cell)):
+		hover_info.emit("blocked: hazard start must be occupied")
+		return
+	_begin_pending(cell)
+	hover_info.emit("%s from (%d,%d) deck %d — click cardinal neighbor or portal edge" % [
+		active_hazard_kind, cell.x, cell.y, cell.z
+	])
+
+
+func _commit_hazard(a: Vector3i, b: Vector3i) -> void:
+	var portal_idx := _find_portal(a, b)
+	if portal_idx >= 0:
+		_commit_hazard_from_portal(portal_idx)
+		return
+	var stored_from := a
+	var stored_to := b
+	if a != b:
+		var reason := _hazard_block_reason(a, b)
+		if reason != "":
+			hover_info.emit(reason)
+			return
+		if not _occupancy.has(_key(b)):
+			# Same-room visual: duplicate from_cell so the loader does not resolve a void.
+			stored_to = a
+	else:
+		# Collapsed stored pair from a prior void-neighbor commit.
+		if not _occupancy.has(_key(a)):
+			hover_info.emit("blocked: hazard start must be occupied")
+			return
+	var existing := _find_hazard(stored_from, stored_to, active_hazard_kind)
+	if existing >= 0:
+		_select_hazard(existing, false)
+		return
+	if not _occupancy.has(_key(stored_from)):
+		hover_info.emit("blocked: hazard start must be occupied")
+		return
+	var from_id := int(_occupancy[_key(stored_from)])
+	var from_stable := _stable_of(from_id)
+	var to_stable := from_stable
+	if stored_from != stored_to and _occupancy.has(_key(stored_to)):
+		to_stable = _stable_of(int(_occupancy[_key(stored_to)]))
+	_append_hazard({
+		"id": _next_hazard_id(active_hazard_kind),
+		"from_room": from_stable,
+		"to_room": to_stable,
+		"from_cell": _cell_xyz(stored_from),
+		"to_cell": _cell_xyz(stored_to),
+		"module_id": "",
+		"kind": active_hazard_kind,
+		"compartment_id": _compartment_for_link(from_id, stored_to),
+		"rationale": "",
+	})
+
+
+func _commit_hazard_from_portal(index: int) -> void:
+	if index < 0 or index >= _portals.size():
+		return
+	var p: Dictionary = _portals[index]
+	var a := _xyz_cell(p.get("from_cell", []))
+	var b := _xyz_cell(p.get("to_cell", []))
+	var existing := _find_hazard(a, b, active_hazard_kind)
+	if existing >= 0:
+		_select_hazard(existing, false)
+		return
+	var from_id := int(p.get("from_room", 0))
+	var from_stable := _stable_of(from_id)
+	var to_stable := from_stable
+	if not bool(p.get("exterior", false)) and int(p.get("to_room", 0)) != 0:
+		to_stable = _stable_of(int(p.get("to_room", 0)))
+	_append_hazard({
+		"id": _next_hazard_id(active_hazard_kind),
+		"from_room": from_stable,
+		"to_room": to_stable,
+		"from_cell": _cell_xyz(a),
+		"to_cell": _cell_xyz(b),
+		"module_id": "",
+		"kind": active_hazard_kind,
+		"compartment_id": _compartment_for_link(from_id, b),
+		"rationale": "",
+	})
+
+
+func _append_hazard(zone: Dictionary) -> void:
+	# Never persist an incomplete overlay. Callers only commit both endpoints.
+	if str(zone.get("id", "")).is_empty() or str(zone.get("kind", "")).is_empty():
+		return
+	if str(zone.get("from_room", "")).is_empty():
+		return
+	var from_cell: Variant = zone.get("from_cell", [])
+	var to_cell: Variant = zone.get("to_cell", [])
+	if not (from_cell is Array) or (from_cell as Array).size() < 3:
+		return
+	if not (to_cell is Array) or (to_cell as Array).size() < 3:
+		return
+	_hazards.append(zone)
+	_selected_kind = "hazard"
+	_selected_hazard = _hazards.size() - 1
+	_selected_portal = -1
+	_selected_vertical = -1
+	_selected_prop = -1
+	_asset_sel = {}
+	if _occupancy.has(_key(_xyz_cell(from_cell))):
+		_selected_id = int(_occupancy[_key(_xyz_cell(from_cell))])
+	_sync_floors()
+	_sync_links()
+	hazards_changed.emit()
+	hazard_selected.emit(_hazard_dto(zone))
+
+
+## Stamp kind only when selecting a *different* zone so re-click inspects.
+func _select_hazard(index: int, may_stamp: bool) -> void:
+	if index < 0 or index >= _hazards.size():
+		return
+	var stamped := false
+	if may_stamp and index != _selected_hazard:
+		var zone: Dictionary = _hazards[index]
+		if str(zone["kind"]) != active_hazard_kind:
+			zone["kind"] = active_hazard_kind
+			stamped = true
+	_selected_kind = "hazard"
+	_selected_hazard = index
+	_selected_portal = -1
+	_selected_vertical = -1
+	_selected_prop = -1
+	_asset_sel = {}
+	var from_cell := _xyz_cell(_hazards[index].get("from_cell", []))
+	if _occupancy.has(_key(from_cell)):
+		_selected_id = int(_occupancy[_key(from_cell)])
+	_sync_floors()
+	_sync_links()
+	if stamped:
+		hazards_changed.emit()
+	hazard_selected.emit(_hazard_dto(_hazards[index]))
+
+
+func _hazard_block_reason(a: Vector3i, b: Vector3i) -> String:
+	if a == b:
+		return "blocked: hazard endpoints must be distinct"
+	if a.z != b.z:
+		return "blocked: hazard endpoints must be cardinal neighbors on the same deck"
+	if not _is_cardinal(a, b):
+		return "blocked: hazard endpoints must be cardinal neighbors"
+	if not _occupancy.has(_key(a)):
+		return "blocked: hazard start must be occupied"
+	return ""
+
+
+func _find_hazard(a: Vector3i, b: Vector3i, kind: String = "") -> int:
+	for i in _hazards.size():
+		var fa := _xyz_cell(_hazards[i]["from_cell"])
+		var ta := _xyz_cell(_hazards[i]["to_cell"])
+		if kind != "" and str(_hazards[i]["kind"]) != kind:
+			continue
+		if (fa == a and ta == b) or (fa == b and ta == a):
+			return i
+	# Void-neighbor commits store (a,a). Occupied a + void b of the same kind
+	# must inspect that collapsed pair, not append a duplicate.
+	if a != b and _occupancy.has(_key(a)) and not _occupancy.has(_key(b)):
+		for i in _hazards.size():
+			var fa2 := _xyz_cell(_hazards[i]["from_cell"])
+			var ta2 := _xyz_cell(_hazards[i]["to_cell"])
+			if kind != "" and str(_hazards[i]["kind"]) != kind:
+				continue
+			if fa2 == a and ta2 == a:
+				return i
+	if b != a and _occupancy.has(_key(b)) and not _occupancy.has(_key(a)):
+		for i in _hazards.size():
+			var fa3 := _xyz_cell(_hazards[i]["from_cell"])
+			var ta3 := _xyz_cell(_hazards[i]["to_cell"])
+			if kind != "" and str(_hazards[i]["kind"]) != kind:
+				continue
+			if fa3 == b and ta3 == b:
+				return i
+	return -1
+
+
+func _hazard_index_near(cell: Vector3i, hit: Vector3) -> int:
+	var portal_like := _portal_index_near(cell, hit)
+	if portal_like >= 0:
+		var p: Dictionary = _portals[portal_like]
+		var idx := _find_hazard(_xyz_cell(p["from_cell"]), _xyz_cell(p["to_cell"]), active_hazard_kind)
+		if idx >= 0:
+			return idx
+		idx = _find_hazard(_xyz_cell(p["from_cell"]), _xyz_cell(p["to_cell"]), "")
+		if idx >= 0:
+			return idx
+	var kind_hit := -1
+	var any_hit := -1
+	for i in _hazards.size():
+		var fa := _xyz_cell(_hazards[i]["from_cell"])
+		var ta := _xyz_cell(_hazards[i]["to_cell"])
+		if fa != cell and ta != cell:
+			continue
+		var other := ta if fa == cell else fa
+		if fa == ta:
+			if str(_hazards[i]["kind"]) == active_hazard_kind:
+				return i
+			if any_hit < 0:
+				any_hit = i
+			continue
+		if _is_cardinal(cell, other):
+			var band := _hit_dir(cell, hit)
+			var want := _dir_between(cell, other)
+			if band == "" or band == want:
+				if str(_hazards[i]["kind"]) == active_hazard_kind:
+					kind_hit = i
+				elif any_hit < 0:
+					any_hit = i
+		elif fa == cell or ta == cell:
+			if str(_hazards[i]["kind"]) == active_hazard_kind and kind_hit < 0:
+				kind_hit = i
+			elif any_hit < 0:
+				any_hit = i
+	if kind_hit >= 0:
+		return kind_hit
+	return any_hit
+
+
+func _dir_between(a: Vector3i, b: Vector3i) -> String:
+	var d := Vector2i(b.x - a.x, b.y - a.y)
+	if d == Vector2i(1, 0):
+		return "east"
+	if d == Vector2i(-1, 0):
+		return "west"
+	if d == Vector2i(0, 1):
+		return "south"
+	if d == Vector2i(0, -1):
+		return "north"
+	return ""
+
+
+func _erase_hazard_at(cell: Vector3i) -> bool:
+	var idx := _hazard_index_near(cell, _last_hit)
+	if idx < 0:
+		# Fallback: any zone touching the cell.
+		for i in _hazards.size():
+			var fa := _xyz_cell(_hazards[i]["from_cell"])
+			var ta := _xyz_cell(_hazards[i]["to_cell"])
+			if fa == cell or ta == cell:
+				idx = i
+				break
+	if idx < 0:
+		return false
+	var was_selected := _selected_kind == "hazard" and _selected_hazard == idx
+	_hazards.remove_at(idx)
+	if _selected_hazard == idx:
+		_selected_hazard = -1
+		_selected_kind = "room"
+	elif _selected_hazard > idx:
+		_selected_hazard -= 1
+	_sync_hazards()
+	hazards_changed.emit()
+	if was_selected:
+		_emit_selection()
+	return true
+
+
+func _hazard_valid(h: Dictionary) -> bool:
+	var a := _xyz_cell(h.get("from_cell", []))
+	var b := _xyz_cell(h.get("to_cell", []))
+	if not _occupancy.has(_key(a)):
+		return false
+	if str(h.get("from_room", "")) != _stable_of(int(_occupancy[_key(a)])):
+		return false
+	if a == b:
+		return str(h.get("to_room", "")) == str(h.get("from_room", ""))
+	if _occupancy.has(_key(b)):
+		return str(h.get("to_room", "")) == _stable_of(int(_occupancy[_key(b)]))
+	# Void to_cell is legal only while the matching exterior portal exists.
+	var portal_idx := _find_portal(a, b)
+	if portal_idx < 0:
+		return false
+	return bool(_portals[portal_idx].get("exterior", false))
+
+
+func _prune_hazards() -> bool:
+	var keep: Dictionary = {}
+	if _selected_kind == "hazard" and _selected_hazard >= 0 and _selected_hazard < _hazards.size():
+		keep = _hazards[_selected_hazard]
+	var next: Array[Dictionary] = []
+	var changed := false
+	for h in _hazards:
+		if _hazard_valid(h):
+			next.append(h)
+		else:
+			changed = true
+	if not changed and next.size() == _hazards.size():
+		_refresh_hazard_rooms()
+		_sync_hazards()
+		return false
+	_hazards = next
+	_selected_hazard = -1
+	if _selected_kind == "hazard":
+		for i in _hazards.size():
+			if _same_endpoints(_hazards[i], keep) and str(_hazards[i].get("kind", "")) == str(keep.get("kind", "")):
+				_selected_hazard = i
+				break
+		if _selected_hazard < 0:
+			_selected_kind = "room"
+	_refresh_hazard_rooms()
+	_sync_hazards()
+	return changed
+
+
+func _refresh_hazard_rooms() -> bool:
+	var changed := false
+	for h in _hazards:
+		var a := _xyz_cell(h.get("from_cell", []))
+		var b := _xyz_cell(h.get("to_cell", []))
+		if not _occupancy.has(_key(a)):
+			continue
+		var from_id := int(_occupancy[_key(a)])
+		var from_sid := _stable_of(from_id)
+		var to_sid := from_sid
+		if _occupancy.has(_key(b)):
+			to_sid = _stable_of(int(_occupancy[_key(b)]))
+		var cid := _compartment_for_link(from_id, b)
+		if str(h.get("from_room", "")) != from_sid or str(h.get("to_room", "")) != to_sid or str(h.get("compartment_id", "")) != cid:
+			changed = true
+		h["from_room"] = from_sid
+		h["to_room"] = to_sid
+		h["compartment_id"] = cid
+	return changed
+
+
+func _compartment_for_link(from_id: int, to_cell: Vector3i) -> String:
+	var cid := compartment_for_role(_room_role(from_id))
+	if cid != "":
+		return cid
+	if _occupancy.has(_key(to_cell)):
+		return compartment_for_role(_room_role(int(_occupancy[_key(to_cell)])))
+	return ""
+
+
+func _stable_of(id: int) -> String:
+	for r in _rooms:
+		if int(r["id"]) == id:
+			return str(r["stable_id"])
+	return ""
+
+
+func _next_hazard_id(kind: String) -> String:
+	var n := _next_hazard_serial
+	var hid := "%s_%02d" % [kind, n]
+	n += 1
+	while _hazard_id_taken(hid):
+		hid = "%s_%02d" % [kind, n]
+		n += 1
+	_next_hazard_serial = n
+	return hid
+
+
+func _hazard_id_taken(hid: String) -> bool:
+	for h in _hazards:
+		if str(h.get("id", "")) == hid:
+			return true
+	return false
+
+
+func _hazard_dto(zone: Dictionary) -> Dictionary:
+	var from_cell: Variant = zone.get("from_cell", [0, 0, 0])
+	var to_cell: Variant = zone.get("to_cell", [0, 0, 0])
+	return {
+		"id": str(zone.get("id", "")),
+		"from_room": str(zone.get("from_room", "")),
+		"to_room": str(zone.get("to_room", "")),
+		"from_cell": from_cell,
+		"to_cell": to_cell,
+		"module_id": str(zone.get("module_id", "")),
+		"kind": str(zone.get("kind", "")),
+		"compartment_id": str(zone.get("compartment_id", "")),
+		"rationale": str(zone.get("rationale", "")),
+	}
+
+
+func _sync_hazards() -> void:
+	if _hazard_root == null:
+		return
+	var wanted: Dictionary = {}
+	for i in _hazards.size():
+		var h: Dictionary = _hazards[i]
+		var k := "%s:%s" % [str(h.get("kind", "")), _undirected_key(_xyz_cell(h["from_cell"]), _xyz_cell(h["to_cell"]))]
+		wanted[k] = i
+	var stale: Array = []
+	for key in _hazard_boxes:
+		if not wanted.has(key):
+			stale.append(key)
+	for key in stale:
+		var old: CSGBox3D = _hazard_boxes[key]
+		_hazard_root.remove_child(old)
+		old.free()
+		_hazard_boxes.erase(key)
+	for key in wanted:
+		var idx: int = wanted[key]
+		var zone: Dictionary = _hazards[idx]
+		var box: CSGBox3D
+		if _hazard_boxes.has(key):
+			box = _hazard_boxes[key]
+		else:
+			box = CSGBox3D.new()
+			box.use_collision = false
+			box.material = StandardMaterial3D.new()
+			_hazard_root.add_child(box)
+			_hazard_boxes[key] = box
+		_style_hazard_box(box, zone, idx == _selected_hazard and _selected_kind == "hazard")
+
+
+func _style_hazard_box(box: CSGBox3D, zone: Dictionary, selected: bool) -> void:
+	var a := _xyz_cell(zone["from_cell"])
+	var b := _xyz_cell(zone["to_cell"])
+	var pa := _center(a.x, a.y, a.z)
+	var pb := _center(b.x, b.y, b.z)
+	box.position = (pa + pb) * 0.5 + Vector3(0, 1.15, 0)
+	if a == b:
+		box.size = Vector3(1.6, 1.8, 1.6)
+	elif a.x != b.x:
+		box.size = Vector3(absf(pb.x - pa.x) + 0.8, 1.8, 1.4)
+	else:
+		box.size = Vector3(1.4, 1.8, absf(pb.z - pa.z) + 0.8)
+	var col: Color = HAZARD_COLORS.get(str(zone.get("kind", "")), Color(0.8, 0.8, 0.3))
+	var mat := box.material as StandardMaterial3D
+	if mat == null:
+		mat = StandardMaterial3D.new()
+		box.material = mat
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.albedo_color = Color(col.r, col.g, col.b, 0.38)
+	mat.emission_enabled = true
+	mat.emission = col
+	mat.emission_energy_multiplier = 0.7 if selected else 0.28
+	box.set_meta("kind", str(zone.get("kind", "")))
+	box.set_meta("zone_id", str(zone.get("id", "")))
+	box.set_meta("deck", a.z)
+	if a.z != active_deck and b.z != active_deck:
+		mat.albedo_color.a = 0.12
+
+
+func _update_hazard_ghost(cell: Vector3i) -> void:
+	if _has_pending:
+		if cell == _pending_cell:
+			_place_cell_ghost(cell, "", "click again to cancel %s" % active_hazard_kind)
+			return
+		var reason := _hazard_block_reason(_pending_cell, cell)
+		var ok := "%s (%d,%d) → (%d,%d)" % [
+			active_hazard_kind, _pending_cell.x, _pending_cell.y, cell.x, cell.y
+		]
+		if reason == "" and _find_hazard(_pending_cell, cell, active_hazard_kind) >= 0:
+			ok = "select existing %s" % active_hazard_kind
+		elif reason == "" and _find_portal(_pending_cell, cell) >= 0:
+			ok = "portal-aligned %s" % active_hazard_kind
+		if _is_cardinal(_pending_cell, cell):
+			_place_edge_ghost(_pending_cell, cell, reason, ok)
+			var mat := _ghost.material_override as StandardMaterial3D
+			if mat and reason == "":
+				var col: Color = HAZARD_COLORS.get(active_hazard_kind, Color(0.8, 0.8, 0.3))
+				mat.albedo_color = Color(col.r, col.g, col.b, 0.42)
+			return
+		_place_cell_ghost(cell, reason if reason != "" else "blocked: hazard endpoints must be cardinal neighbors", "")
+		return
+	var portal_idx := _portal_index_near(cell, _last_hit)
+	if portal_idx >= 0:
+		_ghost.visible = false
+		hover_info.emit("portal-aligned %s" % active_hazard_kind)
+		return
+	var existing := _hazard_index_near(cell, _last_hit)
+	if existing >= 0:
+		_ghost.visible = false
+		var found_kind := str(_hazards[existing].get("kind", ""))
+		if found_kind == active_hazard_kind:
+			hover_info.emit("select %s" % found_kind)
+		else:
+			hover_info.emit("place %s on existing %s link" % [active_hazard_kind, found_kind])
+		return
+	if _occupancy.has(_key(cell)):
+		_place_cell_ghost(cell, "", "%s from (%d,%d) deck %d" % [active_hazard_kind, cell.x, cell.y, cell.z])
+		return
+	_place_cell_ghost(cell, "blocked: hazard start must be occupied", "")
+
+
 func _cell_xyz(cell: Vector3i) -> Array:
 	return [cell.x, cell.y, cell.z]
 
@@ -1854,6 +2571,7 @@ func _sync_links() -> void:
 			_links.add_child(vbox)
 			_vertical_boxes[key] = vbox
 		_style_vertical_box(vbox, vert, vidx == _selected_vertical and _selected_kind == "vertical")
+	_sync_hazards()
 
 
 func _style_portal_box(box: CSGBox3D, portal: Dictionary, selected: bool) -> void:
@@ -1964,6 +2682,7 @@ func _select_prop(index: int) -> void:
 	_selected_portal = -1
 	_selected_vertical = -1
 	_asset_sel = {}
+	_selected_hazard = -1
 	var cell := _xyz_cell(_props[index].get("cell", []))
 	if _occupancy.has(_key(cell)):
 		_selected_id = int(_occupancy[_key(cell)])
@@ -2008,6 +2727,7 @@ func _place_prop(cell: Vector3i, entry: Dictionary) -> void:
 	_selected_prop = _props.size() - 1
 	_selected_portal = -1
 	_selected_vertical = -1
+	_selected_hazard = -1
 	if _occupancy.has(_key(cell)):
 		_selected_id = int(_occupancy[_key(cell)])
 	_sync_floors()

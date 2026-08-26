@@ -36,6 +36,8 @@ var _compile_timer: Timer
 @onready var _role_title: Label = $VBox/Body/LeftDock/LeftTitle
 @onready var _tools_title: Label = $VBox/Body/LeftDock/ToolsTitle
 @onready var _new_room_btn: Button = %NewRoomBtn
+var _hazard_title: Label
+var _hazard_list: VBoxContainer
 @onready var _palette = %PaletteDock
 @onready var _room_list: ItemList = %RoomList
 @onready var _view: SubViewportContainer = %View
@@ -62,7 +64,7 @@ func _ready() -> void:
 	_sync_deck_label()
 	_refresh_phases()
 	_apply_phase(0)
-	_status.text = "Paint LMB · RMB erase · Portal: click A then neighbor · Vertical: stacked N/N±1 · Assign module: click compiled floor/wall/portal · Del removes selected portal/vertical · Esc cancels pending · Q/E deck"
+	_status.text = "Paint LMB · RMB erase · Portal: click A then neighbor · Vertical: stacked N/N±1 · Assign module: click compiled floor/wall/portal · Hazards: Phase 4 · Del removes selected · Esc cancels pending · Q/E deck"
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -105,6 +107,8 @@ func _wire() -> void:
 	_lattice.prop_selected.connect(_on_prop_selected)
 	_lattice.props_changed.connect(_on_props_changed)
 	_lattice.piece_selected.connect(_on_piece_selected)
+	_lattice.hazard_selected.connect(_on_hazard_selected)
+	_lattice.hazards_changed.connect(_on_hazards_changed)
 	_lattice.tool_changed.connect(_on_tool_changed)
 	_lattice.deck_changed.connect(_on_deck_changed)
 	_lattice.hover_info.connect(func(t: String) -> void: _status.text = t)
@@ -116,6 +120,8 @@ func _wire() -> void:
 	_inspector.prop_removed.connect(func() -> void: _lattice.remove_selected_prop())
 	_inspector.module_override_set.connect(_on_module_override_set)
 	_inspector.module_inspect_requested.connect(_on_piece_selected)
+	_inspector.hazard_edited.connect(func(z: Dictionary) -> void: _lattice.apply_hazard_edit(z))
+	_inspector.hazard_removed.connect(func() -> void: _lattice.remove_selected_hazard())
 	_palette.prop_armed.connect(func(e: Dictionary) -> void: _lattice.arm_prop(e))
 	_phase_bar.tab_changed.connect(_on_phase_tab)
 	_room_list.item_selected.connect(_on_room_list_selected)
@@ -133,7 +139,7 @@ func _build_phases() -> void:
 	_phase_bar.add_tab("4 Hazards")
 	_phase_bar.set_tab_disabled(1, true)
 	_phase_bar.set_tab_disabled(2, true)
-	_phase_bar.set_tab_disabled(3, true)
+	_phase_bar.set_tab_disabled(3, false)
 	_phase_bar.current_tab = 0
 
 
@@ -147,23 +153,25 @@ func _on_phase_tab(idx: int) -> void:
 			return
 		_apply_phase(idx)
 		return
-	if idx >= 3:
-		_phase_bar.current_tab = 0
-		return
 	_apply_phase(idx)
 
 
 func _apply_phase(idx: int) -> void:
 	var props_phase: bool = idx == 1 and _compile_ok
 	var assets_phase: bool = idx == 2
+	var hazard_phase: bool = idx == 3
 	_palette.visible = props_phase
 	_tools_title.visible = not props_phase
-	_tool_list.visible = not props_phase
-	_state_title.visible = not props_phase
-	_state_list.visible = not props_phase
-	_role_title.visible = not props_phase
-	_role_scroll.visible = not props_phase
-	_new_room_btn.visible = not props_phase
+	_tool_list.visible = not props_phase and not hazard_phase
+	_state_title.visible = not props_phase and not hazard_phase
+	_state_list.visible = not props_phase and not hazard_phase
+	_role_title.visible = not props_phase and not hazard_phase
+	_role_scroll.visible = not props_phase and not hazard_phase
+	_new_room_btn.visible = not props_phase and not hazard_phase
+	if _hazard_title:
+		_hazard_title.visible = hazard_phase
+	if _hazard_list:
+		_hazard_list.visible = hazard_phase
 	_lattice.set_slot_overlay_visible(props_phase)
 	if props_phase:
 		if _lattice.active_tool != _LATTICE.TOOL_PROP:
@@ -175,10 +183,15 @@ func _apply_phase(idx: int) -> void:
 		if _lattice.active_tool != _LATTICE.TOOL_ASSET:
 			_lattice.set_tool(_LATTICE.TOOL_ASSET)
 		_status.text = "Assign module: click compiled floor/wall/portal · Del removes selected portal/vertical · Esc cancels pending · Q/E deck"
+	elif hazard_phase:
+		if _lattice.active_tool != _LATTICE.TOOL_HAZARD:
+			_lattice.set_tool(_LATTICE.TOOL_HAZARD)
+		_highlight_armed_hazard()
+		_status.text = "Hazards: LMB two cells or a portal edge · re-click inspects · RMB/Del remove · preview markers only, no live ignite"
 	else:
-		if _lattice.active_tool == _LATTICE.TOOL_PROP or _lattice.active_tool == _LATTICE.TOOL_ASSET:
+		if _lattice.active_tool == _LATTICE.TOOL_PROP or _lattice.active_tool == _LATTICE.TOOL_ASSET or _lattice.active_tool == _LATTICE.TOOL_HAZARD:
 			_lattice.set_tool(_LATTICE.TOOL_PAINT)
-		_status.text = "Paint LMB · RMB erase · Portal: click A then neighbor · Vertical: stacked N/N±1 · Assign module: click compiled floor/wall/portal · Del removes selected · Q/E deck"
+		_status.text = "Paint LMB · RMB erase · Portal: click A then neighbor · Vertical: stacked N/N±1 · Assign module: click compiled floor/wall/portal · Hazards: Phase 4 · Del removes selected · Q/E deck"
 
 
 func _build_tools() -> void:
@@ -202,6 +215,7 @@ func _build_tools() -> void:
 		_state_list.add_child(sb)
 	_highlight_armed_tool()
 	_highlight_armed_state()
+	_build_hazard_kinds()
 
 
 func _on_tool_pressed(tool: String) -> void:
@@ -222,6 +236,7 @@ func _highlight_armed_tool() -> void:
 		_LATTICE.TOOL_VERTICAL: "Vertical opening",
 		_LATTICE.TOOL_PROP: "Place prop",
 		_LATTICE.TOOL_ASSET: "Assign module",
+		_LATTICE.TOOL_HAZARD: "Hazard zone",
 	}
 	var want := str(labels.get(armed, "Paint occupancy"))
 	for child in _tool_list.get_children():
@@ -238,6 +253,59 @@ func _highlight_armed_state() -> void:
 		if b == null:
 			continue
 		b.modulate = Color(1.15, 1.1, 0.65) if b.text == armed else Color.WHITE
+
+
+func _build_hazard_kinds() -> void:
+	_hazard_title = Label.new()
+	_hazard_title.text = "Hazard kind"
+	_hazard_list = VBoxContainer.new()
+	_hazard_list.add_theme_constant_override("separation", 4)
+	var dock := _tool_list.get_parent()
+	var insert_at := _state_list.get_index() + 1
+	dock.add_child(_hazard_title)
+	dock.move_child(_hazard_title, insert_at)
+	dock.add_child(_hazard_list)
+	dock.move_child(_hazard_list, insert_at + 1)
+	for kind in _LATTICE.HAZARD_KINDS:
+		var b := Button.new()
+		b.text = _hazard_kind_label(kind)
+		b.set_meta("kind", kind)
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		b.pressed.connect(_on_hazard_kind_pressed.bind(kind))
+		_hazard_list.add_child(b)
+	_hazard_title.visible = false
+	_hazard_list.visible = false
+	_highlight_armed_hazard()
+
+
+func _hazard_kind_label(kind: String) -> String:
+	match kind:
+		"timed_fire":
+			return "Fire"
+		"hull_breach":
+			return "Breach"
+		"electrical_arc":
+			return "Arc"
+		"radiation":
+			return "Radiation"
+		_:
+			return kind
+
+
+func _on_hazard_kind_pressed(kind: String) -> void:
+	_lattice.stamp_hazard_kind(kind)
+	_highlight_armed_hazard()
+
+
+func _highlight_armed_hazard() -> void:
+	if _hazard_list == null:
+		return
+	var armed := str(_lattice.active_hazard_kind)
+	for child in _hazard_list.get_children():
+		var b := child as Button
+		if b == null:
+			continue
+		b.modulate = Color(1.15, 1.1, 0.65) if str(b.get_meta("kind", "")) == armed else Color.WHITE
 
 
 func _build_roles() -> void:
@@ -359,6 +427,35 @@ func _on_prop_selected(prop: Dictionary) -> void:
 func _on_props_changed() -> void:
 	golden = _golden_from_lattice()
 	_refresh_prop_preview()
+
+
+func _on_hazard_selected(zone: Dictionary) -> void:
+	_module_sel = {}
+	_preview.highlight_selection("", "")
+	if zone.is_empty():
+		_inspector.clear()
+		return
+	_inspector.bind_hazard(zone)
+	_highlight_armed_hazard()
+	var sid := str(zone.get("from_room", ""))
+	for i in _room_list.item_count:
+		var id := int(_room_list.get_item_metadata(i))
+		var room := _room_by_id(id)
+		if str(room.get("stable_id", "")) == sid:
+			_room_list.select(i)
+			break
+
+
+func _on_hazards_changed() -> void:
+	golden = _golden_from_lattice()
+	_preview.apply_hazards(_lattice.get_hazards())
+
+
+func _room_by_id(id: int) -> Dictionary:
+	for r in _lattice.get_rooms():
+		if int(r.get("id", 0)) == id:
+			return r
+	return {}
 
 
 func _room_at(cell: Vector3i) -> Dictionary:
@@ -567,7 +664,13 @@ func _on_tool_changed(_t: String) -> void:
 			_phase_bar.current_tab = 1
 			_phase_bar.set_block_signals(false)
 			_apply_phase(1)
-	elif _phase_bar.current_tab == 2 or _phase_bar.current_tab == 1:
+	elif _lattice.active_tool == _LATTICE.TOOL_HAZARD:
+		if _phase_bar.current_tab != 3 and not _phase_bar.is_tab_disabled(3):
+			_phase_bar.set_block_signals(true)
+			_phase_bar.current_tab = 3
+			_phase_bar.set_block_signals(false)
+			_apply_phase(3)
+	elif _phase_bar.current_tab == 2 or _phase_bar.current_tab == 1 or _phase_bar.current_tab == 3:
 		_phase_bar.set_block_signals(true)
 		_phase_bar.current_tab = 0
 		_phase_bar.set_block_signals(false)
@@ -677,6 +780,7 @@ func _run_compile() -> void:
 		_show_issues([{"code": "Extension", "detail": "DerelictAuthor missing. Run scripts/build_windows.ps1 -Builder."}], [])
 		_preview.apply_plan({})
 		_preview.apply_props([], _palettes)
+		_preview.apply_hazards(_lattice.get_hazards())
 		_lattice.set_compile_result({}, {}, false)
 		_lattice.set_occupancy_floors_visible(true)
 		_set_phase2_ready(false)
@@ -686,6 +790,7 @@ func _run_compile() -> void:
 		_show_issues([{"code": "Compile", "detail": str(result["error"])}], [])
 		_preview.apply_plan({})
 		_preview.apply_props([], _palettes)
+		_preview.apply_hazards(_lattice.get_hazards())
 		_lattice.set_compile_result({}, {}, false)
 		_lattice.set_occupancy_floors_visible(true)
 		_set_phase2_ready(false)
@@ -707,6 +812,7 @@ func _run_compile() -> void:
 	_preview.set_active_deck(_lattice.active_deck)
 	_preview.apply_plan(plan)
 	_preview.apply_props(_lattice.get_props(), _palettes)
+	_preview.apply_hazards(_lattice.get_hazards())
 	# Hide occupancy CSG floors only when every occupied cell has a floor GLB.
 	_lattice.set_occupancy_floors_visible(not _preview.covers_occupied_floors())
 	if issues.is_empty() and stale.is_empty() and _issues.item_count > 0:
@@ -861,6 +967,7 @@ func _golden_from_lattice() -> Dictionary:
 		"verticals": _lattice.get_verticals(),
 	}
 	g["room_vars"] = _room_vars.duplicate(true)
+	g["hazards"] = _lattice.get_hazards_dto()
 	var props: Array = []
 	for p in _lattice.get_props():
 		if str(p.get("kind", "")) == "Door":
