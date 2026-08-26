@@ -173,6 +173,14 @@ func hide_ghost() -> void:
 	_sync_pending_anchor()
 
 
+## Hide occupancy CSG floors when kit GLBs cover the same cells. Paint, grid,
+## ghost, and portal/vertical overlays stay active.
+func set_occupancy_floors_visible(visible: bool) -> void:
+	if _floors == null:
+		return
+	_floors.visible = visible
+
+
 func is_painting() -> bool:
 	return _lmb or _rmb
 
