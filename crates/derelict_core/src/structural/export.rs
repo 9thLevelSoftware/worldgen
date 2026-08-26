@@ -4,18 +4,45 @@
 //! shapes mirror the committed golden fixtures
 //! (`data/procgen/golden/coherent_ship_001`).
 
-use crate::model::{EntityKind, Ship};
+use crate::archetype::ItemRegistry;
+use crate::authoring::{
+    compile_authored, AuthoredProp, GoldenArea, GoldenScope, InventoryMode, LinkZone,
+};
+use crate::model::{
+    CauseOfLoss, EntityKind, EntitySpec, GridPos, ItemStack, RoomGraph, Ship, GENERATOR_VERSION,
+    INTACT_MAX,
+};
 use crate::role::Role;
-use crate::stages::furnish::interior_zones;
+use crate::stages::furnish::{implied_access_entities, interior_zones};
+use crate::structural::compile::DefaultModulePicker;
 use crate::structural::plan::{
     edge_key, Cell, DamageVariant, Dir, EdgeRecord, FloorPlacement, RoomId, StructuralPlan, NO_ROOM,
 };
+use crate::structural::project::project_to_raster;
+use crate::structural::validate::{validate, ValidationPolicy};
 use serde_json::{json, Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Stable, human-readable room id string ("airlock_01" style).
-fn room_name(role: Role, id: RoomId) -> String {
+pub fn room_name(role: Role, id: RoomId) -> String {
     format!("{}_{:02}", role.name(), id)
+}
+
+/// generate_ship export names: `"{role}_{id:02}"`.
+pub fn default_room_names(ship: &Ship) -> BTreeMap<RoomId, String> {
+    ship.topology
+        .rooms
+        .iter()
+        .map(|r| (r.id, room_name(r.role, r.id)))
+        .collect()
+}
+
+fn name_of_id(id: RoomId, names: &BTreeMap<RoomId, String>) -> String {
+    if id == NO_ROOM {
+        String::new()
+    } else {
+        names.get(&id).cloned().unwrap_or_default()
+    }
 }
 
 fn cell2(c: Cell) -> Value {
@@ -158,19 +185,17 @@ impl Default for ExportOptions {
 }
 
 pub fn to_layout_json(ship: &Ship, opts: &ExportOptions) -> Value {
-    let names: BTreeMap<RoomId, String> = ship
-        .topology
-        .rooms
-        .iter()
-        .map(|r| (r.id, room_name(r.role, r.id)))
-        .collect();
-    let name_of = |id: RoomId| -> String {
-        if id == NO_ROOM {
-            String::new()
-        } else {
-            names.get(&id).cloned().unwrap_or_default()
-        }
-    };
+    to_layout_json_named(ship, opts, &default_room_names(ship))
+}
+
+/// Same as [`to_layout_json`] with an explicit `RoomId →` name map.
+/// generate_ship uses [`default_room_names`]; golden export uses `stable_id`.
+pub fn to_layout_json_named(
+    ship: &Ship,
+    opts: &ExportOptions,
+    names: &BTreeMap<RoomId, String>,
+) -> Value {
+    let name_of = |id: RoomId| name_of_id(id, names);
     let zones = interior_zones(&ship.topology, &ship.plan);
 
     // --- rooms --------------------------------------------------------------
@@ -324,13 +349,12 @@ pub fn to_layout_json(ship: &Ship, opts: &ExportOptions) -> Value {
 /// Companion gameplay slice (schema 1.1.0): loot containers from the ship's
 /// container entities, objectives from the goal room.
 pub fn to_gameplay_slice_json(ship: &Ship) -> Value {
-    let names: BTreeMap<RoomId, String> = ship
-        .topology
-        .rooms
-        .iter()
-        .map(|r| (r.id, room_name(r.role, r.id)))
-        .collect();
-    let name_of = |id: RoomId| names.get(&id).cloned().unwrap_or_default();
+    to_gameplay_slice_json_named(ship, &default_room_names(ship))
+}
+
+/// Same as [`to_gameplay_slice_json`] with an explicit `RoomId →` name map.
+pub fn to_gameplay_slice_json_named(ship: &Ship, names: &BTreeMap<RoomId, String>) -> Value {
+    let name_of = |id: RoomId| name_of_id(id, names);
     let room_at = |deck: u8, x: i32, y: i32| -> Option<RoomId> {
         ship.topology
             .rooms
@@ -400,5 +424,410 @@ pub fn to_gameplay_slice_json(ship: &Ship) -> Value {
             ship.intactness as f32 / 10_000.0,
             ship.cause_of_loss
         ),
+    })
+}
+
+/// Playable documents produced from a golden area.
+#[derive(Clone, Debug)]
+pub struct PlayableExport {
+    pub layout: Value,
+    pub gameplay_slice: Value,
+}
+
+/// Compile + validate a golden area, synthesize a `Ship`, and reuse the
+/// existing serializers with `stable_id` room names. Fail-closed.
+pub fn layout_from_golden(golden: &GoldenArea) -> Result<PlayableExport, String> {
+    let topology = golden.to_topology()?;
+    let (plan, _stale) =
+        compile_authored(&topology, &DefaultModulePicker, &golden.module_overrides);
+
+    let (entry_sid, goal_sid) = golden.resolved_entry_goal()?;
+    let entry_room = resolve_stable_id(golden, &entry_sid)?;
+    let goal_room = resolve_stable_id(golden, &goal_sid)?;
+    if topology.rooms.iter().all(|r| r.id != entry_room) {
+        return Err(format!("unresolved entry_room '{entry_sid}'"));
+    }
+    if topology.rooms.iter().all(|r| r.id != goal_room) {
+        return Err(format!("unresolved goal_room '{goal_sid}'"));
+    }
+
+    let critical_path = if golden.scope == GoldenScope::Room || entry_room == goal_room {
+        vec![entry_room]
+    } else {
+        derelict_bfs(&topology, entry_room, goal_room).ok_or_else(|| {
+            format!("CriticalPathBroken: no BFS path from '{entry_sid}' to '{goal_sid}'")
+        })?
+    };
+    let policy = match golden.scope {
+        GoldenScope::Room | GoldenScope::Area => ValidationPolicy::pre_damage(Vec::new()),
+        GoldenScope::Derelict => ValidationPolicy::pre_damage(critical_path.clone()),
+    };
+    if let Err(issues) = validate(&plan, &topology, &policy) {
+        return Err(issues
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"));
+    }
+
+    let (mut entities, next_id) = implied_access_entities(&topology, &plan, 1);
+    let items = offline_items();
+    entities.extend(
+        golden
+            .props
+            .iter()
+            .enumerate()
+            .map(|(i, prop)| prop_to_entity(prop, next_id + i as u32, &items)),
+    );
+
+    let decks = project_to_raster(&topology, &plan)
+        .into_iter()
+        .map(|layer| crate::model::Deck { layer })
+        .collect();
+
+    let ship = Ship {
+        generator_version: GENERATOR_VERSION,
+        seed: 0,
+        archetype_id: "golden".into(),
+        template_id: golden.id.clone(),
+        intactness: INTACT_MAX,
+        cause_of_loss: CauseOfLoss::Unknown,
+        topology,
+        plan,
+        entry_room,
+        goal_room,
+        critical_path,
+        decks,
+        room_graph: RoomGraph::default(),
+        entities,
+        damage_events: Vec::new(),
+        fractured: false,
+        fragments: Vec::new(),
+    };
+
+    let names = golden.room_stable_ids();
+    let kit_id = if golden.kit_id.is_empty() {
+        ExportOptions::default().kit_id
+    } else {
+        golden.kit_id.clone()
+    };
+    let opts = ExportOptions {
+        kit_id,
+        ..Default::default()
+    };
+    let mut layout = to_layout_json_named(&ship, &opts, &names);
+    let mut gameplay_slice = to_gameplay_slice_json_named(&ship, &names);
+    overlay_authored(&mut layout, &mut gameplay_slice, golden)?;
+    Ok(PlayableExport {
+        layout,
+        gameplay_slice,
+    })
+}
+
+fn resolve_stable_id(golden: &GoldenArea, stable_id: &str) -> Result<RoomId, String> {
+    golden
+        .topology
+        .rooms
+        .iter()
+        .find(|r| r.stable_id == stable_id)
+        .map(|r| r.id)
+        .ok_or_else(|| format!("unresolved room stable_id '{stable_id}'"))
+}
+
+fn derelict_bfs(
+    topology: &crate::structural::plan::Topology,
+    entry: RoomId,
+    goal: RoomId,
+) -> Option<Vec<RoomId>> {
+    let mut links = Vec::new();
+    for p in &topology.portals {
+        if p.from_room != NO_ROOM && p.to_room != NO_ROOM {
+            links.push((p.from_room, p.to_room));
+        }
+    }
+    for v in &topology.verticals {
+        if v.from_room != NO_ROOM && v.to_room != NO_ROOM {
+            links.push((v.from_room, v.to_room));
+        }
+    }
+    crate::topology::room_path(entry, goal, &links)
+}
+
+fn offline_items() -> ItemRegistry {
+    ron::from_str(include_str!("../../assets/items.ron"))
+        .unwrap_or(ItemRegistry { items: Vec::new() })
+}
+
+fn prop_to_entity(prop: &AuthoredProp, id: u32, items: &ItemRegistry) -> EntitySpec {
+    let deck = u8::try_from(prop.cell[2]).unwrap_or(0);
+    let inventory = match prop.inventory_mode {
+        InventoryMode::Explicit => prop
+            .inventory
+            .iter()
+            .filter_map(|s| {
+                items.id_of(&s.item_id).map(|item_id| ItemStack {
+                    item_id,
+                    qty: s.qty,
+                })
+            })
+            .collect(),
+        InventoryMode::LootTable | InventoryMode::Empty => Vec::new(),
+    };
+    EntitySpec {
+        id,
+        kind: prop.kind,
+        proto: prop.proto.clone(),
+        pos: GridPos::new(prop.cell[0], prop.cell[1], deck),
+        rotation: prop.rotation,
+        locked: prop.locked,
+        open: false,
+        inventory,
+        tags: Vec::new(),
+    }
+}
+
+fn overlay_authored(
+    layout: &mut Value,
+    slice: &mut Value,
+    golden: &GoldenArea,
+) -> Result<(), String> {
+    if let Some(gen) = layout.get_mut("generator").and_then(Value::as_object_mut) {
+        gen.insert("name".into(), json!("derelict_builder"));
+    }
+    if let Some(obj) = layout.as_object_mut() {
+        obj.insert("hazard_source".into(), json!("authored"));
+        obj.insert(
+            "fire_zones".into(),
+            link_zones_json(&golden.hazards.fire_zones),
+        );
+        obj.insert(
+            "arc_zones".into(),
+            link_zones_json(&golden.hazards.arc_zones),
+        );
+        obj.insert(
+            "breach_zones".into(),
+            link_zones_json(&golden.hazards.breach_zones),
+        );
+        obj.insert(
+            "radiation_zones".into(),
+            link_zones_json(&golden.hazards.radiation_zones),
+        );
+    }
+
+    let mut vars_by_name: BTreeMap<&str, &crate::authoring::RoomVars> = BTreeMap::new();
+    let mut vented: Vec<Value> = Vec::new();
+    let mut seen_cid: BTreeSet<&str> = BTreeSet::new();
+    for room in &golden.topology.rooms {
+        if let Some(vars) = golden.room_vars.get(&room.id.to_string()) {
+            vars_by_name.insert(room.stable_id.as_str(), vars);
+            if vars.vented {
+                if let Some(cid) = compartment_for_role(&room.role) {
+                    if seen_cid.insert(cid) {
+                        vented.push(json!(cid));
+                    }
+                }
+            }
+        }
+    }
+    if let Some(obj) = slice.as_object_mut() {
+        obj.insert(
+            "fire_zones".into(),
+            link_zones_json(&golden.hazards.fire_zones),
+        );
+        obj.insert("vented_compartments".into(), Value::Array(vented));
+    }
+    if let Some(rooms) = layout.get_mut("rooms").and_then(Value::as_array_mut) {
+        for room in rooms {
+            let Some(id) = room.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(vars) = vars_by_name.get(id) else {
+                continue;
+            };
+            if let Some(obj) = room.as_object_mut() {
+                obj.insert("depressurized".into(), json!(vars.depressurized));
+                obj.insert("atmosphere_bp".into(), json!(vars.oxygen_bp));
+            }
+        }
+    }
+
+    overlay_loot_contents(slice, golden)
+}
+
+/// Loader `COMPARTMENT_FOR_ROLE`. Unmapped roles stay visual-only.
+fn compartment_for_role(role: &str) -> Option<&'static str> {
+    match role {
+        "bridge" | "cockpit" => Some("bridge"),
+        "engineering" | "reactor" | "engine_bay" => Some("engineering"),
+        "hydroponics" => Some("hydroponics"),
+        "cargo" | "storage" => Some("cargo"),
+        _ => None,
+    }
+}
+
+fn link_zones_json(zones: &[LinkZone]) -> Value {
+    Value::Array(zones.iter().map(link_zone_json).collect())
+}
+
+fn link_zone_json(z: &LinkZone) -> Value {
+    json!({
+        "id": z.id,
+        "zone_id": z.id,
+        "from_room": z.from_room,
+        "to_room": z.to_room,
+        "from_cell": z.from_cell,
+        "to_cell": z.to_cell,
+        "module_id": z.module_id,
+        "kind": z.kind,
+        "compartment_id": z.compartment_id,
+        "rationale": z.rationale,
+    })
+}
+
+fn overlay_loot_contents(slice: &mut Value, golden: &GoldenArea) -> Result<(), String> {
+    if slice
+        .get("loot_containers")
+        .and_then(Value::as_array)
+        .is_none()
+    {
+        if let Some(obj) = slice.as_object_mut() {
+            obj.insert("loot_containers".into(), json!([]));
+        }
+    }
+    let Some(containers) = slice
+        .get_mut("loot_containers")
+        .and_then(Value::as_array_mut)
+    else {
+        return Ok(());
+    };
+
+    for container in containers.iter_mut() {
+        let Some(cell) = approach_cell_of(container) else {
+            continue;
+        };
+        let Some(prop) = golden
+            .props
+            .iter()
+            .find(|p| holds_loot(p.kind) && p.cell == cell)
+        else {
+            continue;
+        };
+        let Some(obj) = container.as_object_mut() else {
+            continue;
+        };
+        apply_loot_overlay(obj, prop);
+    }
+
+    // Serializer only emits Containers (generate_ship hash-stable). ItemPiles
+    // are appended here so playable goldens still carry authored loot.
+    let mut extra: Vec<Value> = Vec::new();
+    for prop in &golden.props {
+        if prop.kind != EntityKind::ItemPile {
+            continue;
+        }
+        if containers
+            .iter()
+            .any(|c| approach_cell_of(c) == Some(prop.cell))
+        {
+            continue;
+        }
+        let Some(room_id) = room_stable_at(golden, prop.cell) else {
+            continue;
+        };
+        let mut row = itempile_loot_row(prop, &room_id);
+        if let Some(obj) = row.as_object_mut() {
+            apply_loot_overlay(obj, prop);
+        }
+        extra.push(row);
+    }
+    containers.extend(extra);
+
+    for prop in &golden.props {
+        if !holds_loot(prop.kind) {
+            continue;
+        }
+        if !containers
+            .iter()
+            .any(|c| approach_cell_of(c) == Some(prop.cell))
+        {
+            return Err(format!(
+                "explicit {:?} '{}' has no matching loot_containers row (cell {:?})",
+                prop.kind, prop.proto, prop.cell
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn holds_loot(kind: EntityKind) -> bool {
+    matches!(kind, EntityKind::Container | EntityKind::ItemPile)
+}
+
+fn approach_cell_of(v: &Value) -> Option<[i32; 3]> {
+    let a = v.get("approach_cell")?.as_array()?;
+    if a.len() < 3 {
+        return None;
+    }
+    Some([
+        a[0].as_i64()? as i32,
+        a[1].as_i64()? as i32,
+        a[2].as_i64()? as i32,
+    ])
+}
+
+fn room_stable_at(golden: &GoldenArea, cell: [i32; 3]) -> Option<String> {
+    let deck = u8::try_from(cell[2]).ok()?;
+    golden
+        .topology
+        .rooms
+        .iter()
+        .find(|r| r.deck == deck && r.cells.iter().any(|c| c[0] == cell[0] && c[1] == cell[1]))
+        .map(|r| r.stable_id.clone())
+}
+
+fn apply_loot_overlay(obj: &mut Map<String, Value>, prop: &AuthoredProp) {
+    match prop.inventory_mode {
+        InventoryMode::Explicit => {
+            obj.insert("contents".into(), loot_contents_json(prop));
+            obj.insert("loot_table".into(), json!(explicit_table(prop)));
+        }
+        InventoryMode::LootTable => {
+            if let Some(table) = prop.loot_table.as_ref().filter(|t| !t.is_empty()) {
+                obj.insert("loot_table".into(), json!(table));
+            }
+        }
+        InventoryMode::Empty => {
+            // Do not leave the serializer's worldgen_seeded stamp on an
+            // authored-empty container — the loader would roll loot.
+            obj.insert("loot_table".into(), json!("authored_empty"));
+            obj.insert("contents".into(), json!([]));
+        }
+    }
+}
+
+fn explicit_table(prop: &AuthoredProp) -> &str {
+    prop.loot_table
+        .as_deref()
+        .filter(|t| !t.is_empty())
+        .unwrap_or("authored_explicit")
+}
+
+fn loot_contents_json(prop: &AuthoredProp) -> Value {
+    Value::Array(
+        prop.inventory
+            .iter()
+            .map(|s| json!({ "item_id": s.item_id, "qty": s.qty }))
+            .collect(),
+    )
+}
+
+fn itempile_loot_row(prop: &AuthoredProp, room_id: &str) -> Value {
+    json!({
+        "id": format!("itempile_{}", prop.id),
+        "kind": prop.proto,
+        "room_id": room_id,
+        "approach_cell": prop.cell,
+        "loot_table": explicit_table(prop),
+        "contents": loot_contents_json(prop),
     })
 }

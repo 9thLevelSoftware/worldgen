@@ -1,0 +1,55 @@
+{
+  "critical_path": [
+    "airlock_01"
+  ],
+  "document_kind": "ship_gameplay_slice",
+  "fire_zones": [],
+  "goal_room": "airlock_01",
+  "loot_containers": [
+    {
+      "approach_cell": [
+        0,
+        1,
+        0
+      ],
+      "contents": [
+        {
+          "item_id": "scrap_metal",
+          "qty": 2
+        }
+      ],
+      "id": "container_2",
+      "kind": "suit_locker",
+      "loot_table": "authored_explicit",
+      "room_id": "airlock_01"
+    }
+  ],
+  "objectives": [
+    {
+      "approach_cell": [
+        0,
+        0,
+        0
+      ],
+      "approach_distance_cells": 1,
+      "cell": [
+        0,
+        0,
+        0
+      ],
+      "id": "airlock_01:reach_goal",
+      "interactable": false,
+      "kind": "single",
+      "room_id": "airlock_01",
+      "room_role": "airlock",
+      "semantic": "goal_room",
+      "sequence": 1,
+      "type": "reach_room"
+    }
+  ],
+  "program_id": "worldgen-golden-0",
+  "schema_version": "1.1.0",
+  "start_room": "airlock_01",
+  "summary": "worldgen golden seed 0 intactness 1.00 (Unknown)",
+  "vented_compartments": []
+}

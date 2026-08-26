@@ -22,12 +22,14 @@ var _entry_room := ""
 var _goal_room := ""
 var _compile_ok := false
 var _compile_timer: Timer
+var _export_dialog: FileDialog
 
 @onready var _banner: PanelContainer = %Banner
 @onready var _banner_label: Label = %BannerLabel
 @onready var _phase_bar: TabBar = %PhaseBar
 @onready var _deck_label: Label = %DeckLabel
 @onready var _iso_btn: Button = %IsoBtn
+@onready var _export_btn: Button = %ExportBtn
 @onready var _tool_list: VBoxContainer = %ToolList
 @onready var _state_title: Label = %StateTitle
 @onready var _state_list: VBoxContainer = %StateList
@@ -97,6 +99,14 @@ func _wire() -> void:
 	%DeckUp.pressed.connect(func() -> void: _lattice.nudge_deck(1))
 	%AddDeck.pressed.connect(func() -> void: _lattice.add_deck())
 	_iso_btn.pressed.connect(_toggle_iso)
+	_export_btn.pressed.connect(_on_export_pressed)
+	_export_dialog = FileDialog.new()
+	_export_dialog.file_mode = FileDialog.FILE_MODE_OPEN_DIR
+	_export_dialog.access = FileDialog.ACCESS_FILESYSTEM
+	_export_dialog.title = "Export layout.json + gameplay_slice.json"
+	_export_dialog.min_size = Vector2i(720, 420)
+	_export_dialog.dir_selected.connect(_on_export_dir)
+	add_child(_export_dialog)
 	%NewRoomBtn.pressed.connect(func() -> void: _lattice.create_room())
 	_view.gui_input.connect(_on_view_gui_input)
 	_view.mouse_exited.connect(_on_view_pointer_cancelled)
@@ -345,6 +355,48 @@ func _notification(what: int) -> void:
 func _on_view_pointer_cancelled() -> void:
 	if _lattice:
 		_lattice.cancel_pointer()
+
+
+func _on_export_pressed() -> void:
+	if author == null:
+		_status.text = "export failed: DerelictAuthor missing"
+		return
+	_export_dialog.popup_centered()
+
+
+func _on_export_dir(dir: String) -> void:
+	if author == null:
+		_status.text = "export failed: DerelictAuthor missing"
+		return
+	golden = _golden_from_lattice()
+	var kit := str(golden.get("kit_id", "ship_structural_v0"))
+	var docs: Dictionary = author.export_playable(golden, kit)
+	var err := str(docs.get("error", ""))
+	if not err.is_empty():
+		_status.text = "export failed: %s" % err.split("\n")[0]
+		_show_issues([{"code": "Export", "detail": err}], [])
+		return
+	var layout := str(docs.get("layout_json", ""))
+	var slice := str(docs.get("gameplay_slice_json", ""))
+	if layout.is_empty() or slice.is_empty():
+		_status.text = "export failed: empty documents"
+		return
+	var lp := dir.path_join("layout.json")
+	var gp := dir.path_join("gameplay_slice.json")
+	if not _write_text(lp, layout) or not _write_text(gp, slice):
+		return
+	_status.text = "exported %s and %s" % [lp, gp]
+
+
+func _write_text(path: String, text: String) -> bool:
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		_status.text = "export failed: cannot write %s" % path
+		return false
+	f.store_string(text)
+	if not text.ends_with("\n"):
+		f.store_string("\n")
+	return true
 
 
 func _on_view_gui_input(event: InputEvent) -> void:
@@ -765,9 +817,11 @@ func _bind_palettes() -> void:
 	if author == null:
 		_palettes = {}
 		_palette.bind_palettes({})
+		_inspector.bind_palettes({})
 		return
 	_palettes = author.palettes()
 	_palette.bind_palettes(_palettes)
+	_inspector.bind_palettes(_palettes)
 
 
 func _schedule_compile() -> void:

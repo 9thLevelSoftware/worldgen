@@ -78,6 +78,11 @@ unique_name_in_owner = true
 layout_mode = 2
 text = "Cam: Iso"
 
+[node name="ExportBtn" type="Button" parent="VBox/TopBar"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Export playable"
+
 [node name="RootLabel" type="Label" parent="VBox/TopBar"]
 unique_name_in_owner = true
 layout_mode = 2

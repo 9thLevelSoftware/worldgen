@@ -624,6 +624,23 @@ func apply_prop_edit(edited: Dictionary) -> void:
 		var rot := int(edited["rotation"])
 		if rot >= 0 and rot <= 3:
 			prop["rotation"] = _PALETTE.clamp_rotation(prop, rot)
+	if edited.has("inventory_mode"):
+		prop["inventory_mode"] = str(edited["inventory_mode"])
+	if edited.has("inventory"):
+		var inv: Array = []
+		for s in edited.get("inventory", []):
+			if s is Dictionary:
+				inv.append({
+					"item_id": str(s.get("item_id", "")),
+					"qty": int(s.get("qty", 1)),
+				})
+		prop["inventory"] = inv
+	if edited.has("loot_table"):
+		var loot: Variant = edited["loot_table"]
+		if loot == null or (loot is String and str(loot).is_empty()):
+			prop["loot_table"] = null
+		else:
+			prop["loot_table"] = str(loot)
 	props_changed.emit()
 	prop_selected.emit(_prop_dto(prop))
 

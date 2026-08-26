@@ -73,8 +73,19 @@ var _pr_cell: Label
 var _pr_rot: Label
 var _pr_facing: Label
 var _pr_locked: CheckBox
+var _pr_inv_box: VBoxContainer
+var _pr_inv_mode: OptionButton
+var _pr_inv_list: ItemList
+var _pr_inv_item: OptionButton
+var _pr_inv_qty: SpinBox
+var _pr_inv_add: Button
+var _pr_inv_remove: Button
+var _pr_inv_table: LineEdit
+var _pr_inv_table_pick: OptionButton
 var _pr_note: Label
 var _pr_remove: Button
+var _item_ids: PackedStringArray = PackedStringArray()
+var _loot_tables: PackedStringArray = PackedStringArray()
 var _atm_note: Label
 var _cid_label: Label
 
@@ -222,6 +233,53 @@ func _ready() -> void:
 	_pr_locked.text = "locked"
 	_pr_locked.toggled.connect(func(_v: bool) -> void: _emit_prop())
 	_prop_fields.add_child(_pr_locked)
+
+	_pr_inv_box = VBoxContainer.new()
+	_pr_inv_box.add_theme_constant_override("separation", 4)
+	_prop_fields.add_child(_pr_inv_box)
+	var inv_title := Label.new()
+	inv_title.text = "Inventory"
+	inv_title.theme_type_variation = "HeaderSmall"
+	_pr_inv_box.add_child(inv_title)
+	_pr_inv_mode = OptionButton.new()
+	_pr_inv_mode.add_item("empty")
+	_pr_inv_mode.add_item("explicit")
+	_pr_inv_mode.add_item("loot_table")
+	_pr_inv_mode.item_selected.connect(func(_i: int) -> void: _on_inv_mode())
+	_labeled_in(_pr_inv_box, "mode", _pr_inv_mode)
+	_pr_inv_list = ItemList.new()
+	_pr_inv_list.custom_minimum_size = Vector2(0, 72)
+	_pr_inv_box.add_child(_pr_inv_list)
+	var inv_row := HBoxContainer.new()
+	_pr_inv_item = OptionButton.new()
+	_pr_inv_item.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	inv_row.add_child(_pr_inv_item)
+	_pr_inv_qty = SpinBox.new()
+	_pr_inv_qty.min_value = 1
+	_pr_inv_qty.max_value = 999
+	_pr_inv_qty.rounded = true
+	_pr_inv_qty.value = 1
+	inv_row.add_child(_pr_inv_qty)
+	_pr_inv_box.add_child(inv_row)
+	var inv_btns := HBoxContainer.new()
+	_pr_inv_add = Button.new()
+	_pr_inv_add.text = "Add stack"
+	_pr_inv_add.pressed.connect(_on_inv_add)
+	inv_btns.add_child(_pr_inv_add)
+	_pr_inv_remove = Button.new()
+	_pr_inv_remove.text = "Remove stack"
+	_pr_inv_remove.pressed.connect(_on_inv_remove)
+	inv_btns.add_child(_pr_inv_remove)
+	_pr_inv_box.add_child(inv_btns)
+	_pr_inv_table_pick = OptionButton.new()
+	_pr_inv_table_pick.item_selected.connect(_on_inv_table_picked)
+	_labeled_in(_pr_inv_box, "loot table", _pr_inv_table_pick)
+	_pr_inv_table = LineEdit.new()
+	_pr_inv_table.placeholder_text = "loot table id"
+	_pr_inv_table.text_submitted.connect(func(_t: String) -> void: _emit_prop())
+	_pr_inv_table.focus_exited.connect(_emit_prop)
+	_labeled_in(_pr_inv_box, "or type id", _pr_inv_table)
+
 	_pr_note = Label.new()
 	_pr_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_pr_note.modulate = Color(0.85, 0.85, 0.7)
@@ -433,10 +491,20 @@ func bind_prop(prop: Dictionary) -> void:
 	var facing: Variant = prop.get("facing", null)
 	_pr_facing.text = str(facing) if facing != null and str(facing) != "" else "—"
 	_pr_locked.set_pressed_no_signal(bool(prop.get("locked", false)))
+	_fill_item_options()
+	_fill_loot_table_options()
+	var mode := str(prop.get("inventory_mode", "empty"))
+	var midx := ["empty", "explicit", "loot_table"].find(mode)
+	_pr_inv_mode.select(midx if midx >= 0 else 0)
+	_refresh_inv_list()
+	var table := str(prop.get("loot_table", ""))
+	_pr_inv_table.text = table
+	_select_loot_table(table)
+	_sync_inv_visibility()
 	if str(prop.get("proto", "")) == "bunk" or bool(prop.get("stand_in", false)):
 		_pr_note.text = "preview stand-in: bunk → generic_locker (no bunk GLB)."
 	else:
-		_pr_note.text = "R cycles rotation 0..=3. Doors/ladders are not painted."
+		_pr_note.text = "R cycles rotation 0..=3. Explicit stacks use catalog ids (scrap_metal offline)."
 	_syncing = false
 
 
@@ -710,11 +778,154 @@ func _hazard_honesty(compartment_id: String) -> String:
 	return "Preview/export marker only — no live ignite. Layout overlay is link-shaped; runtime ignition is a later follow-up."
 
 
+func bind_palettes(palettes: Dictionary) -> void:
+	_item_ids = PackedStringArray()
+	for rec_v in palettes.get("items", []):
+		if rec_v is Dictionary:
+			var id := str((rec_v as Dictionary).get("item_id", ""))
+			if not id.is_empty():
+				_item_ids.append(id)
+	if _item_ids.is_empty():
+		_item_ids.append("scrap_metal")
+	_loot_tables = PackedStringArray()
+	for t in palettes.get("loot_tables", []):
+		var id := str(t)
+		if not id.is_empty():
+			_loot_tables.append(id)
+	if _pr_inv_item != null:
+		_fill_item_options()
+		_fill_loot_table_options()
+
+
+func _holds_loot(kind: String) -> bool:
+	return kind == "Container" or kind == "ItemPile"
+
+
+func _on_inv_mode() -> void:
+	if _syncing:
+		return
+	_sync_inv_visibility()
+	_emit_prop()
+
+
+func _on_inv_add() -> void:
+	if _syncing or _prop.is_empty():
+		return
+	var stacks: Array = _prop.get("inventory", [])
+	if not (stacks is Array):
+		stacks = []
+	var item_id := "scrap_metal"
+	if _pr_inv_item.item_count > 0 and _pr_inv_item.selected >= 0:
+		item_id = _pr_inv_item.get_item_text(_pr_inv_item.selected)
+	stacks.append({"item_id": item_id, "qty": int(_pr_inv_qty.value)})
+	_prop["inventory"] = stacks
+	_prop["inventory_mode"] = "explicit"
+	_pr_inv_mode.select(1)
+	_refresh_inv_list()
+	_sync_inv_visibility()
+	_emit_prop()
+
+
+func _on_inv_remove() -> void:
+	if _syncing or _prop.is_empty():
+		return
+	var selected := _pr_inv_list.get_selected_items()
+	if selected.is_empty():
+		return
+	var stacks: Array = _prop.get("inventory", [])
+	if not (stacks is Array):
+		return
+	stacks.remove_at(int(selected[0]))
+	_prop["inventory"] = stacks
+	_refresh_inv_list()
+	_emit_prop()
+
+
+func _on_inv_table_picked(idx: int) -> void:
+	if _syncing or idx < 0:
+		return
+	_pr_inv_table.text = _pr_inv_table_pick.get_item_text(idx)
+	_emit_prop()
+
+
+func _fill_item_options() -> void:
+	if _pr_inv_item == null:
+		return
+	_pr_inv_item.clear()
+	var ids := _item_ids
+	if ids.is_empty():
+		ids = PackedStringArray(["scrap_metal"])
+	for id in ids:
+		_pr_inv_item.add_item(id)
+	var scrap := ids.find("scrap_metal")
+	if scrap >= 0:
+		_pr_inv_item.select(scrap)
+	elif _pr_inv_item.item_count > 0:
+		_pr_inv_item.select(0)
+
+
+func _fill_loot_table_options() -> void:
+	_pr_inv_table_pick.clear()
+	_pr_inv_table_pick.add_item("")
+	for id in _loot_tables:
+		_pr_inv_table_pick.add_item(id)
+
+
+func _select_loot_table(table: String) -> void:
+	var idx := 0
+	for i in _pr_inv_table_pick.item_count:
+		if _pr_inv_table_pick.get_item_text(i) == table:
+			idx = i
+			break
+	_pr_inv_table_pick.select(idx)
+
+
+func _refresh_inv_list() -> void:
+	_pr_inv_list.clear()
+	for s in _prop.get("inventory", []):
+		if s is Dictionary:
+			_pr_inv_list.add_item("%s × %d" % [str(s.get("item_id", "")), int(s.get("qty", 1))])
+
+
+func _sync_inv_visibility() -> void:
+	var show_inv := _holds_loot(str(_prop.get("kind", "")))
+	_pr_inv_box.visible = show_inv
+	if not show_inv:
+		return
+	var mode := _pr_inv_mode.get_item_text(_pr_inv_mode.selected) if _pr_inv_mode.selected >= 0 else "empty"
+	var explicit := mode == "explicit"
+	var table := mode == "loot_table"
+	_pr_inv_list.visible = explicit
+	_pr_inv_item.visible = explicit
+	_pr_inv_qty.visible = explicit
+	_pr_inv_add.visible = explicit
+	_pr_inv_remove.visible = explicit
+	_pr_inv_table.visible = table
+	_pr_inv_table_pick.visible = table
+	_pr_inv_table.get_parent().visible = table
+	_pr_inv_table_pick.get_parent().visible = table
+	_pr_inv_item.get_parent().visible = explicit
+
+
 func _emit_prop() -> void:
 	if _syncing or _prop.is_empty():
 		return
 	var next_prop := _prop.duplicate(true)
 	next_prop["locked"] = _pr_locked.button_pressed
+	if _holds_loot(str(next_prop.get("kind", ""))):
+		var mode := "empty"
+		if _pr_inv_mode.selected >= 0:
+			mode = _pr_inv_mode.get_item_text(_pr_inv_mode.selected)
+		next_prop["inventory_mode"] = mode
+		if mode == "loot_table":
+			var table := _pr_inv_table.text.strip_edges()
+			next_prop["loot_table"] = table if not table.is_empty() else null
+		else:
+			next_prop["loot_table"] = null
+		if mode != "explicit":
+			# Keep authored stacks when switching away so they round-trip if the
+			# author switches back; empty mode still serializes the array.
+			pass
 	_prop = next_prop
 	prop_edited.emit(next_prop)
 

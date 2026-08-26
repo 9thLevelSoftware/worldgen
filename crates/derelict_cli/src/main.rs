@@ -53,21 +53,31 @@ struct Args {
     #[arg(
         long,
         value_name = "GOLDEN_AREA_JSON",
-        conflicts_with = "author_compile"
+        conflicts_with_all = ["author_compile", "author_export"]
     )]
     author_validate: Option<String>,
     /// Compile a golden_area.json and dump StructuralPlan JSON plus issues. Skips generate.
     #[arg(
         long,
         value_name = "GOLDEN_AREA_JSON",
-        conflicts_with = "author_validate"
+        conflicts_with_all = ["author_validate", "author_export"]
     )]
     author_compile: Option<String>,
+    /// Compile a golden_area.json and write layout.json + gameplay_slice.json. Skips generate.
+    #[arg(
+        long,
+        value_name = "GOLDEN_AREA_JSON",
+        conflicts_with_all = ["author_validate", "author_compile"]
+    )]
+    author_export: Option<String>,
 }
 
 fn main() {
     let args = Args::parse();
-    if args.author_validate.is_some() || args.author_compile.is_some() {
+    if args.author_validate.is_some()
+        || args.author_compile.is_some()
+        || args.author_export.is_some()
+    {
         run_author(&args);
         return;
     }
@@ -200,6 +210,18 @@ struct AuthorResult {
 }
 
 fn run_author(args: &Args) {
+    if let Some(path) = args.author_export.as_deref() {
+        match author_export(path, args.export_dir.as_deref()) {
+            Ok((layout, slice)) => {
+                println!("exported {layout} and {slice}");
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let dump = args.author_compile.is_some();
     let path = args
         .author_compile
@@ -230,6 +252,38 @@ fn run_author(args: &Args) {
             }
         }
     }
+}
+
+fn author_export(path: &str, export_dir: Option<&str>) -> Result<(String, String), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("failed to read {path}: {e}"))?;
+    let golden: GoldenArea =
+        serde_json::from_str(&text).map_err(|e| format!("failed to parse {path}: {e}"))?;
+    let docs = derelict_core::structural::export::layout_from_golden(&golden)?;
+    let dir = match export_dir {
+        Some(d) => std::path::PathBuf::from(d),
+        None => std::path::Path::new(path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(&golden.id),
+    };
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
+    let layout_path = dir.join("layout.json");
+    let slice_path = dir.join("gameplay_slice.json");
+    std::fs::write(
+        &layout_path,
+        serde_json::to_string_pretty(&docs.layout).map_err(|e| e.to_string())? + "\n",
+    )
+    .map_err(|e| format!("failed to write {}: {e}", layout_path.display()))?;
+    std::fs::write(
+        &slice_path,
+        serde_json::to_string_pretty(&docs.gameplay_slice).map_err(|e| e.to_string())? + "\n",
+    )
+    .map_err(|e| format!("failed to write {}: {e}", slice_path.display()))?;
+    Ok((
+        layout_path.to_string_lossy().into_owned(),
+        slice_path.to_string_lossy().into_owned(),
+    ))
 }
 
 fn author_golden(path: &str) -> Result<AuthorResult, String> {
@@ -728,5 +782,41 @@ mod tests {
             "issues: {:?}",
             result.issues
         );
+    }
+
+    #[test]
+    fn author_export_airlock_2x2() {
+        let dir =
+            std::env::temp_dir().join(format!("derelict_author_export_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (layout, slice) =
+            author_export(&airlock_path(), Some(dir.to_str().unwrap())).expect("export");
+        let layout_v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&layout).unwrap()).unwrap();
+        let slice_v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&slice).unwrap()).unwrap();
+        assert_eq!(layout_v["generator"]["name"], "derelict_builder");
+        assert!(layout_v["portals"].as_array().unwrap().is_empty());
+        assert_eq!(slice_v["objectives"][0]["id"], "airlock_01:reach_goal");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn author_export_floor_bad_module_fails() {
+        let mut golden: GoldenArea =
+            serde_json::from_str(&std::fs::read_to_string(airlock_path()).unwrap()).unwrap();
+        golden
+            .module_overrides
+            .floors
+            .insert("0|0|0".into(), "floor_2x1".into());
+        let dir =
+            std::env::temp_dir().join(format!("derelict_author_export_bad_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bad = dir.join("bad.json");
+        std::fs::write(&bad, serde_json::to_string(&golden).unwrap()).unwrap();
+        let err = author_export(bad.to_str().unwrap(), Some(dir.to_str().unwrap()))
+            .expect_err("FloorBadModule");
+        assert!(err.contains("FloorBadModule"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
