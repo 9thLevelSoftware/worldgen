@@ -1,13 +1,22 @@
 class_name InspectorDock
 extends VBoxContainer
-## Selected-room inspector, including room_vars fields.
+## Selected room, portal, or vertical inspector.
+
+const _LATTICE := preload("res://scripts/OccupancyLattice.gd")
 
 signal room_edited(room: Dictionary, vars: Dictionary)
+signal portal_edited(portal: Dictionary)
+signal portal_removed
+signal vertical_removed
 
 var _syncing := false
 var _room: Dictionary = {}
 var _vars: Dictionary = {}
+var _portal: Dictionary = {}
+var _vertical: Dictionary = {}
 var _fields: VBoxContainer
+var _portal_fields: VBoxContainer
+var _vert_fields: VBoxContainer
 
 var _id_label: Label
 var _stable: LineEdit
@@ -22,6 +31,20 @@ var _temp: SpinBox
 var _notes: LineEdit
 var _empty: Label
 
+var _p_from: Label
+var _p_to: Label
+var _p_cells: Label
+var _p_ext: Label
+var _p_state: OptionButton
+var _p_note: Label
+var _p_remove: Button
+
+var _v_from: Label
+var _v_to: Label
+var _v_cells: Label
+var _v_note: Label
+var _v_remove: Button
+
 
 func _ready() -> void:
 	add_theme_constant_override("separation", 6)
@@ -31,7 +54,7 @@ func _ready() -> void:
 	add_child(title)
 
 	_empty = Label.new()
-	_empty.text = "Room list: inspect only. Occupied cell: stamp+select (re-click the same room to inspect)."
+	_empty.text = "Room list: inspect only. Paint: occupied click stamps+selects (re-click inspects). Portal: click A then a cardinal neighbor. Vertical: stacked occupied cells on N and N±1. Delete removes the selected portal or vertical."
 	_empty.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	add_child(_empty)
 
@@ -44,7 +67,7 @@ func _ready() -> void:
 	_stable.text_submitted.connect(func(_t: String) -> void: _emit())
 	_stable.focus_exited.connect(_emit)
 	_role = OptionButton.new()
-	for r in OccupancyLattice.ROLES:
+	for r in _LATTICE.ROLES:
 		_role.add_item(r)
 	_role.item_selected.connect(func(_i: int) -> void: _emit())
 	_labeled("role", _role)
@@ -68,10 +91,62 @@ func _ready() -> void:
 
 	_fields.visible = false
 
+	_portal_fields = VBoxContainer.new()
+	_portal_fields.add_theme_constant_override("separation", 6)
+	add_child(_portal_fields)
+	var ptitle := Label.new()
+	ptitle.text = "Portal"
+	ptitle.theme_type_variation = "HeaderSmall"
+	_portal_fields.add_child(ptitle)
+	_p_from = _ro_line_in(_portal_fields, "from_room")
+	_p_to = _ro_line_in(_portal_fields, "to_room")
+	_p_cells = _ro_line_in(_portal_fields, "cells")
+	_p_cells.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_p_ext = _ro_line_in(_portal_fields, "exterior")
+	_p_state = OptionButton.new()
+	for s in _LATTICE.PORTAL_STATES:
+		_p_state.add_item(s)
+	_p_state.item_selected.connect(func(_i: int) -> void: _emit_portal())
+	_labeled_in(_portal_fields, "state", _p_state)
+	_p_note = Label.new()
+	_p_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_p_note.modulate = Color(0.85, 0.85, 0.7)
+	_portal_fields.add_child(_p_note)
+	_p_remove = Button.new()
+	_p_remove.text = "Remove portal"
+	_p_remove.pressed.connect(func() -> void: portal_removed.emit())
+	_portal_fields.add_child(_p_remove)
+	_portal_fields.visible = false
+
+	_vert_fields = VBoxContainer.new()
+	_vert_fields.add_theme_constant_override("separation", 6)
+	add_child(_vert_fields)
+	var vtitle := Label.new()
+	vtitle.text = "Vertical opening"
+	vtitle.theme_type_variation = "HeaderSmall"
+	_vert_fields.add_child(vtitle)
+	_v_from = _ro_line_in(_vert_fields, "from_room")
+	_v_to = _ro_line_in(_vert_fields, "to_room")
+	_v_cells = _ro_line_in(_vert_fields, "cells")
+	_v_cells.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_v_note = Label.new()
+	_v_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_v_note.modulate = Color(0.85, 0.85, 0.7)
+	_vert_fields.add_child(_v_note)
+	_v_remove = Button.new()
+	_v_remove.text = "Remove vertical"
+	_v_remove.pressed.connect(func() -> void: vertical_removed.emit())
+	_vert_fields.add_child(_v_remove)
+	_vert_fields.visible = false
+
 
 func bind_room(room: Dictionary, vars: Dictionary) -> void:
 	_room = room
 	_vars = vars.duplicate(true)
+	_portal = {}
+	_vertical = {}
+	_portal_fields.visible = false
+	_vert_fields.visible = false
 	if room.is_empty():
 		_empty.visible = true
 		_fields.visible = false
@@ -82,8 +157,8 @@ func bind_room(room: Dictionary, vars: Dictionary) -> void:
 	_id_label.text = str(int(room.get("id", 0)))
 	_stable.text = str(room.get("stable_id", ""))
 	var role := str(room.get("role", "compartment"))
-	var idx := OccupancyLattice.ROLES.find(role)
-	_role.select(idx if idx >= 0 else OccupancyLattice.ROLES.find("compartment"))
+	var idx := _LATTICE.ROLES.find(role)
+	_role.select(idx if idx >= 0 else _LATTICE.ROLES.find("compartment"))
 	_deck.text = str(int(room.get("deck", 0)))
 	_cells.text = _format_cells(room.get("cells", []))
 	_oxygen.set_value_no_signal(int(vars.get("oxygen_bp", 8500)))
@@ -92,6 +167,63 @@ func bind_room(room: Dictionary, vars: Dictionary) -> void:
 	_rad.set_value_no_signal(int(vars.get("radiation_bp", 0)))
 	_temp.set_value_no_signal(int(vars.get("temperature_c", 18)))
 	_notes.text = str(vars.get("notes", ""))
+	_syncing = false
+
+
+func bind_portal(portal: Dictionary) -> void:
+	_portal = portal.duplicate(true)
+	_room = {}
+	_vertical = {}
+	_fields.visible = false
+	_vert_fields.visible = false
+	if portal.is_empty():
+		_portal_fields.visible = false
+		_empty.visible = true
+		return
+	_empty.visible = false
+	_portal_fields.visible = true
+	_syncing = true
+	_p_from.text = str(int(portal.get("from_room", 0)))
+	_p_to.text = str(int(portal.get("to_room", 0)))
+	_p_cells.text = "%s → %s" % [
+		_format_xyz(portal.get("from_cell", [])),
+		_format_xyz(portal.get("to_cell", [])),
+	]
+	var exterior := bool(portal.get("exterior", false))
+	_p_ext.text = "true" if exterior else "false"
+	var state := str(portal.get("state", "DOOR"))
+	var idx := _LATTICE.PORTAL_STATES.find(state)
+	_p_state.select(idx if idx >= 0 else 0)
+	if state == "BREACH":
+		_p_note.text = "BREACH compiles with an empty module_id (no doorway mesh)."
+	else:
+		_p_note.text = "Doorway module follows this state at compile."
+	_syncing = false
+
+
+func bind_vertical(vertical: Dictionary) -> void:
+	_vertical = vertical.duplicate(true)
+	_room = {}
+	_portal = {}
+	_fields.visible = false
+	_portal_fields.visible = false
+	if vertical.is_empty():
+		_vert_fields.visible = false
+		_empty.visible = true
+		return
+	_empty.visible = false
+	_vert_fields.visible = true
+	_syncing = true
+	_v_from.text = str(int(vertical.get("from_room", 0)))
+	_v_to.text = str(int(vertical.get("to_room", 0)))
+	_v_cells.text = "%s ↔ %s" % [
+		_format_xyz(vertical.get("from_cell", [])),
+		_format_xyz(vertical.get("to_cell", [])),
+	]
+	_v_note.text = "Ceiling is suppressed on %s and %s." % [
+		_cell_key(vertical.get("from_cell", [])),
+		_cell_key(vertical.get("to_cell", [])),
+	]
 	_syncing = false
 
 
@@ -117,6 +249,39 @@ func _emit() -> void:
 	room_edited.emit(next_room, next_vars)
 
 
+func _emit_portal() -> void:
+	if _syncing or _portal.is_empty():
+		return
+	var next_portal := _portal.duplicate(true)
+	next_portal["state"] = _p_state.get_item_text(_p_state.selected)
+	_portal = next_portal
+	if str(next_portal["state"]) == "BREACH":
+		_p_note.text = "BREACH compiles with an empty module_id (no doorway mesh)."
+	else:
+		_p_note.text = "Doorway module follows this state at compile."
+	portal_edited.emit(next_portal)
+
+
+func _format_xyz(cell: Variant) -> String:
+	if cell is Array and (cell as Array).size() >= 3:
+		var a: Array = cell
+		return "[%d, %d, %d]" % [int(a[0]), int(a[1]), int(a[2])]
+	if cell is Vector3i:
+		var c: Vector3i = cell
+		return "[%d, %d, %d]" % [c.x, c.y, c.z]
+	return "—"
+
+
+func _cell_key(cell: Variant) -> String:
+	if cell is Array and (cell as Array).size() >= 3:
+		var a: Array = cell
+		return "%d|%d|%d" % [int(a[2]), int(a[0]), int(a[1])]
+	if cell is Vector3i:
+		var c: Vector3i = cell
+		return "%d|%d|%d" % [c.z, c.x, c.y]
+	return "?"
+
+
 func _format_cells(cells: Variant) -> String:
 	var arr: Array = cells if cells is Array else []
 	var parts: PackedStringArray = PackedStringArray()
@@ -129,9 +294,13 @@ func _format_cells(cells: Variant) -> String:
 
 
 func _ro_line(caption: String) -> Label:
+	return _ro_line_in(_fields, caption)
+
+
+func _ro_line_in(host: VBoxContainer, caption: String) -> Label:
 	var value := Label.new()
 	value.text = "—"
-	_labeled(caption, value)
+	_labeled_in(host, caption, value)
 	return value
 
 
@@ -161,6 +330,10 @@ func _check(caption: String) -> CheckBox:
 
 
 func _labeled(caption: String, widget: Control) -> void:
+	_labeled_in(_fields, caption, widget)
+
+
+func _labeled_in(host: VBoxContainer, caption: String, widget: Control) -> void:
 	var row := HBoxContainer.new()
 	var l := Label.new()
 	l.text = caption
@@ -168,4 +341,4 @@ func _labeled(caption: String, widget: Control) -> void:
 	row.add_child(l)
 	widget.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(widget)
-	_fields.add_child(row)
+	host.add_child(row)
