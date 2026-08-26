@@ -342,6 +342,7 @@ pub fn to_layout_json_named(
         "fire_zones": link_zones_json(&ship.hazard_overlay.fire_zones),
         "arc_zones": link_zones_json(&ship.hazard_overlay.arc_zones),
         "breach_zones": link_zones_json(&ship.hazard_overlay.breach_zones),
+        "radiation_zones": link_zones_json(&ship.hazard_overlay.radiation_zones),
         "structural_plan": structural_plan,
     })
 }
@@ -795,6 +796,11 @@ fn overlay_authored_container(row: &mut Value, e: &EntitySpec) {
     let Some(obj) = row.as_object_mut() else {
         return;
     };
+    if e.tags.iter().any(|t| t == "authored_empty") {
+        obj.insert("loot_table".into(), json!("authored_empty"));
+        obj.insert("contents".into(), json!([]));
+        return;
+    }
     if let Some(table) = e
         .tags
         .iter()

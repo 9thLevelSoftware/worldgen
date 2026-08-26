@@ -650,7 +650,10 @@ fn authored_entity(prop: &AuthoredProp, id: u32, items: &ItemRegistry) -> Entity
                 tags.push(format!("authored_loot_table:{table}"));
             }
         }
-        InventoryMode::Empty => {}
+        InventoryMode::Empty => {
+            tags.push("authored_skip_loot".into());
+            tags.push("authored_empty".into());
+        }
     }
     EntitySpec {
         id,
