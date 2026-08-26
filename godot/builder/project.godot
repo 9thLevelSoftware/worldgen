@@ -1,0 +1,20 @@
+; Engine configuration file.
+config_version=5
+
+[application]
+
+config/name="Derelict Builder"
+run/main_scene="res://builder.tscn"
+config/features=PackedStringArray("4.6")
+
+[display]
+
+window/size/viewport_width=1600
+window/size/viewport_height=900
+window/stretch/mode="disabled"
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
+environment/defaults/default_clear_color=Color(0.04, 0.045, 0.08, 1)
