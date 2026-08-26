@@ -1,6 +1,5 @@
 target/
 *.png
-.opengrok/
 godot/.godot/
 godot/addons/derelict/bin/
 godot/builder/.godot/

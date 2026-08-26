@@ -1,16 +1,8 @@
 class_name InspectorDock
 extends VBoxContainer
-## Selected-room inspector. Room vars are authored here even though the
-## hazards GUI (PR 10) is not in this shell yet.
+## Selected-room inspector, including room_vars fields.
 
 signal room_edited(room: Dictionary, vars: Dictionary)
-
-const ROLES: PackedStringArray = [
-	"airlock", "dock", "corridor", "main_spine", "hub", "ramp", "elevator",
-	"bridge", "engineering", "reactor", "life_support", "maintenance",
-	"cargo", "hangar", "storage", "armory", "security", "medical",
-	"crew_quarters", "mess_hall", "compartment",
-]
 
 var _syncing := false
 var _room: Dictionary = {}
@@ -52,7 +44,7 @@ func _ready() -> void:
 	_stable.text_submitted.connect(func(_t: String) -> void: _emit())
 	_stable.focus_exited.connect(_emit)
 	_role = OptionButton.new()
-	for r in ROLES:
+	for r in OccupancyLattice.ROLES:
 		_role.add_item(r)
 	_role.item_selected.connect(func(_i: int) -> void: _emit())
 	_labeled("role", _role)
@@ -90,8 +82,8 @@ func bind_room(room: Dictionary, vars: Dictionary) -> void:
 	_id_label.text = str(int(room.get("id", 0)))
 	_stable.text = str(room.get("stable_id", ""))
 	var role := str(room.get("role", "compartment"))
-	var idx := ROLES.find(role)
-	_role.select(idx if idx >= 0 else ROLES.find("compartment"))
+	var idx := OccupancyLattice.ROLES.find(role)
+	_role.select(idx if idx >= 0 else OccupancyLattice.ROLES.find("compartment"))
 	_deck.text = str(int(room.get("deck", 0)))
 	_cells.text = _format_cells(room.get("cells", []))
 	_oxygen.set_value_no_signal(int(vars.get("oxygen_bp", 8500)))

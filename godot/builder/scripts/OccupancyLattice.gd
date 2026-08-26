@@ -1,7 +1,7 @@
 class_name OccupancyLattice
 extends Node3D
 ## 3D occupancy lattice (not a TileMapLayer). Cells snap to CELL_SIZE_M.
-## Phase 1 only: paint / erase / room / role / deck. No portals or verticals.
+## Occupancy paint / erase / room / role / deck only. No portal tools.
 
 signal occupancy_changed
 signal room_selected(room: Dictionary)
@@ -17,6 +17,14 @@ const ISO_YAW := 45.0
 const ISO_PITCH := -35.264
 const CARDINALS: Array[Vector2i] = [
 	Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1),
+]
+
+## Canonical Role::name() spellings; palette and inspector share this list.
+const ROLES: PackedStringArray = [
+	"airlock", "dock", "corridor", "main_spine", "hub", "ramp", "elevator",
+	"bridge", "engineering", "reactor", "life_support", "maintenance",
+	"cargo", "hangar", "storage", "armory", "security", "medical",
+	"crew_quarters", "mess_hall", "compartment",
 ]
 
 const ROLE_COLORS := {
@@ -55,6 +63,7 @@ var _next_id: int = 1
 var _camera: Camera3D
 var _pivot: Node3D
 var _floors: Node3D
+var _floor_boxes: Dictionary = {} # "deck|x|y" -> CSGBox3D
 var _grid: MeshInstance3D
 var _ghost: MeshInstance3D
 var _iso := true
@@ -67,6 +76,8 @@ var _rmb := false
 var _orbiting := false
 var _panning := false
 var _paint_drag := false
+var _last_screen := Vector2.ZERO
+var _has_last_screen := false
 
 
 func _ready() -> void:
@@ -99,18 +110,19 @@ func set_iso(iso: bool) -> void:
 
 
 func hide_ghost() -> void:
+	_has_last_screen = false
 	if _ghost:
 		_ghost.visible = false
 
 
-func create_room() -> Dictionary:
-	var room := _make_room(active_role, active_deck)
-	_rooms.append(room)
-	_selected_id = int(room["id"])
-	_rebuild_floors()
-	occupancy_changed.emit()
-	room_selected.emit(room)
-	return room
+func is_painting() -> bool:
+	return _lmb or _rmb
+
+
+## Arm a new room; the RoomSpec is created on the next successful void paint.
+func create_room() -> void:
+	_selected_id = 0
+	room_selected.emit({})
 
 
 func stamp_role(role: String) -> void:
@@ -118,8 +130,10 @@ func stamp_role(role: String) -> void:
 	var room := get_selected()
 	if room.is_empty():
 		return
+	if str(room["role"]) == role:
+		return
 	room["role"] = role
-	_rebuild_floors()
+	_sync_floors()
 	occupancy_changed.emit()
 	room_selected.emit(room)
 
@@ -135,8 +149,7 @@ func apply_room_edit(edited: Dictionary) -> void:
 		var role := str(edited.get("role", ""))
 		if not role.is_empty():
 			r["role"] = role
-			active_role = role
-		_rebuild_floors()
+		_sync_floors()
 		occupancy_changed.emit()
 		room_selected.emit(r)
 		return
@@ -144,16 +157,18 @@ func apply_room_edit(edited: Dictionary) -> void:
 
 func select_room_id(id: int) -> void:
 	_selected_id = id
-	_rebuild_floors()
+	_sync_floors()
 	room_selected.emit(get_selected())
 
 
 func nudge_deck(delta: int) -> void:
+	if is_painting():
+		return
 	set_active_deck(active_deck + delta)
 
 
 func add_deck() -> void:
-	if deck_count >= MAX_DECKS:
+	if is_painting() or deck_count >= MAX_DECKS:
 		return
 	deck_count += 1
 	set_active_deck(deck_count - 1)
@@ -165,13 +180,18 @@ func set_active_deck(deck: int) -> void:
 		return
 	active_deck = d
 	_rebuild_grid()
-	_rebuild_floors()
+	_sync_floors()
 	_apply_camera()
+	_refresh_ghost()
 	deck_changed.emit(active_deck)
 
 
 func handle_gui_input(event: InputEvent, viewport: SubViewport) -> void:
 	var host := viewport.get_parent() as Control
+	if event is InputEventMouseButton or event is InputEventMouseMotion:
+		var pos := (event as InputEventMouse).position
+		_last_screen = _to_vp(pos, viewport)
+		_has_last_screen = true
 	if event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
 		if mb.button_index == MOUSE_BUTTON_WHEEL_UP and mb.pressed:
@@ -351,7 +371,11 @@ func _pick_cell(screen: Vector2) -> Dictionary:
 func _try_lmb(cell: Vector3i) -> bool:
 	var key := _key(cell)
 	if _occupancy.has(key):
-		select_room_id(int(_occupancy[key]))
+		var id := int(_occupancy[key])
+		var stamped := _stamp_room_id(id, active_role)
+		select_room_id(id)
+		if stamped:
+			occupancy_changed.emit()
 		return false
 	return _try_paint(cell)
 
@@ -375,7 +399,7 @@ func _try_paint(cell: Vector3i) -> bool:
 	(room["cells"] as Array).append(Vector2i(cell.x, cell.y))
 	_occupancy[_key(cell)] = int(room["id"])
 	_sync_deck_count()
-	_rebuild_floors()
+	_sync_floors()
 	occupancy_changed.emit()
 	room_selected.emit(room)
 	return true
@@ -405,7 +429,7 @@ func _erase_cell(cell: Vector3i) -> void:
 			continue
 		leftover.append(r)
 	_rooms = leftover
-	_rebuild_floors()
+	_sync_floors()
 	occupancy_changed.emit()
 	room_selected.emit(get_selected())
 
@@ -440,8 +464,39 @@ func _in_aabb(x: int, y: int) -> bool:
 	return x >= AABB_MIN and x <= AABB_MAX and y >= AABB_MIN and y <= AABB_MAX
 
 
+func _stamp_room_id(id: int, role: String) -> bool:
+	for r in _rooms:
+		if int(r["id"]) != id:
+			continue
+		if str(r["role"]) == role:
+			return false
+		r["role"] = role
+		return true
+	return false
+
+
+func _refresh_ghost() -> void:
+	if not _has_last_screen:
+		hide_ghost()
+		_has_last_screen = false
+		return
+	var cell := _pick_cell(_last_screen)
+	if cell.get("ok", false):
+		_update_ghost(cell["cell"])
+	else:
+		if _ghost:
+			_ghost.visible = false
+
+
 func _key(cell: Vector3i) -> String:
 	return "%d|%d|%d" % [cell.z, cell.x, cell.y]
+
+
+func _cell_from_key(key: String) -> Vector3i:
+	var parts := key.split("|")
+	if parts.size() != 3:
+		return Vector3i.ZERO
+	return Vector3i(int(parts[1]), int(parts[2]), int(parts[0]))
 
 
 func _center(x: int, y: int, deck: int) -> Vector3:
@@ -498,7 +553,12 @@ func _update_ghost(cell: Vector3i) -> void:
 			if int(r["id"]) == id:
 				sid = str(r["stable_id"])
 				break
-		hover_info.emit("select %s  (%d,%d deck %d)" % [sid, cell.x, cell.y, cell.z])
+		if sid.is_empty() or str(_room_role(id)) == active_role:
+			hover_info.emit("select %s  (%d,%d deck %d)" % [sid, cell.x, cell.y, cell.z])
+		else:
+			hover_info.emit("stamp %s on %s  (%d,%d deck %d)" % [
+				active_role, sid, cell.x, cell.y, cell.z
+			])
 		return
 	_ghost.visible = true
 	_ghost.position = _center(cell.x, cell.y, cell.z)
@@ -512,6 +572,13 @@ func _update_ghost(cell: Vector3i) -> void:
 		hover_info.emit(reason)
 
 
+func _room_role(id: int) -> String:
+	for r in _rooms:
+		if int(r["id"]) == id:
+			return str(r["role"])
+	return ""
+
+
 func _color_for(room: Dictionary) -> Color:
 	var role := str(room.get("role", "compartment"))
 	var base: Color = ROLE_COLORS.get(role, Color(0.55, 0.58, 0.6))
@@ -519,34 +586,59 @@ func _color_for(room: Dictionary) -> Color:
 	return base.lerp(Color.from_hsv(h, 0.35, 0.85), 0.22)
 
 
-func _rebuild_floors() -> void:
+func _style_floor_box(box: CSGBox3D, room: Dictionary, deck: int) -> void:
+	var col := _color_for(room)
+	var mat := box.material as StandardMaterial3D
+	if mat == null:
+		mat = StandardMaterial3D.new()
+		box.material = mat
+	mat.albedo_color = col
+	var selected := int(room["id"]) == _selected_id
+	mat.emission_enabled = selected
+	if selected:
+		mat.emission = col
+		mat.emission_energy_multiplier = 0.4
+	if deck != active_deck:
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.albedo_color.a = 0.16 if deck > active_deck else 0.34
+	else:
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
+		mat.albedo_color.a = 1.0
+
+
+func _sync_floors() -> void:
 	if _floors == null:
 		return
-	while _floors.get_child_count() > 0:
-		var old := _floors.get_child(0)
-		_floors.remove_child(old)
-		old.free()
+	var wanted: Dictionary = {}
 	for room in _rooms:
-		var col := _color_for(room)
-		var selected := int(room["id"]) == _selected_id
 		var deck := int(room["deck"])
 		for c in room["cells"]:
 			var p: Vector2i = c
-			var box := CSGBox3D.new()
+			wanted[_key(Vector3i(p.x, p.y, deck))] = room
+	var stale: Array = []
+	for key in _floor_boxes:
+		if not wanted.has(key):
+			stale.append(key)
+	for key in stale:
+		var old: CSGBox3D = _floor_boxes[key]
+		_floors.remove_child(old)
+		old.free()
+		_floor_boxes.erase(key)
+	for key in wanted:
+		var room: Dictionary = wanted[key]
+		var cell := _cell_from_key(str(key))
+		var box: CSGBox3D
+		if _floor_boxes.has(key):
+			box = _floor_boxes[key]
+		else:
+			box = CSGBox3D.new()
 			box.use_collision = false
 			box.size = Vector3(CELL_SIZE_M - 0.1, 0.14, CELL_SIZE_M - 0.1)
-			box.position = _center(p.x, p.y, deck)
-			var mat := StandardMaterial3D.new()
-			mat.albedo_color = col
-			if selected:
-				mat.emission_enabled = true
-				mat.emission = col
-				mat.emission_energy_multiplier = 0.4
-			if deck != active_deck:
-				mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-				mat.albedo_color.a = 0.16 if deck > active_deck else 0.34
-			box.material = mat
+			box.position = _center(cell.x, cell.y, cell.z)
+			box.material = StandardMaterial3D.new()
 			_floors.add_child(box)
+			_floor_boxes[key] = box
+		_style_floor_box(box, room, cell.z)
 
 
 func _rebuild_grid() -> void:

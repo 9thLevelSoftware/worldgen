@@ -1,15 +1,9 @@
 class_name BuilderApp
 extends Control
 ## Standalone occupancy author. Owns the GoldenArea dict and live-compiles
-## through DerelictAuthor on a 50 ms debounce. CSG floors only (GLB is PR 7).
+## through DerelictAuthor on a 50 ms debounce. CSG floors only.
 
 const COMPILE_DEBOUNCE_S := 0.05
-const ROLES: PackedStringArray = [
-	"airlock", "dock", "corridor", "main_spine", "hub", "ramp", "elevator",
-	"bridge", "engineering", "reactor", "life_support", "maintenance",
-	"cargo", "hangar", "storage", "armory", "security", "medical",
-	"crew_quarters", "mess_hall", "compartment",
-]
 
 var author
 var golden: Dictionary = {}
@@ -19,7 +13,6 @@ var _display_name := "Untitled"
 var _entry_room := ""
 var _goal_room := ""
 var _compile_timer: Timer
-var _role_group: ButtonGroup
 
 @onready var _banner: PanelContainer = %Banner
 @onready var _banner_label: Label = %BannerLabel
@@ -43,15 +36,20 @@ func _ready() -> void:
 	_build_roles()
 	_wire()
 	golden = _empty_golden()
-	author = DerelictAuthor.new()
+	if ClassDB.class_exists("DerelictAuthor"):
+		author = ClassDB.instantiate("DerelictAuthor")
 	_resolve_content()
 	_schedule_compile()
 	_sync_deck_label()
-	_status.text = "LMB paint · RMB erase · click select · Q/E [ ] deck · MMB pan/orbit · wheel zoom"
+	_status.text = "LMB paint · RMB erase · click room stamps role · Q/E [ ] deck · MMB pan/orbit · wheel zoom"
 
 
 func _unhandled_input(event: InputEvent) -> void:
 	if not (event is InputEventKey and event.pressed and not event.echo):
+		return
+	if event.ctrl_pressed or event.alt_pressed or event.meta_pressed:
+		return
+	if _lattice.is_painting():
 		return
 	match event.keycode:
 		KEY_Q, KEY_BRACKETLEFT:
@@ -95,21 +93,27 @@ func _build_phases() -> void:
 
 
 func _build_roles() -> void:
-	_role_group = ButtonGroup.new()
-	for role in ROLES:
+	for role in OccupancyLattice.ROLES:
 		var b := Button.new()
 		b.text = role
-		b.toggle_mode = true
-		b.button_group = _role_group
 		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		if role == _lattice.active_role:
-			b.button_pressed = true
 		b.pressed.connect(_on_role_pressed.bind(role))
 		_role_list.add_child(b)
+	_highlight_armed_role()
 
 
 func _on_role_pressed(role: String) -> void:
 	_lattice.stamp_role(role)
+	_highlight_armed_role()
+
+
+func _highlight_armed_role() -> void:
+	var armed := str(_lattice.active_role)
+	for child in _role_list.get_children():
+		var b := child as Button
+		if b == null:
+			continue
+		b.modulate = Color(1.15, 1.1, 0.65) if b.text == armed else Color.WHITE
 
 
 func _toggle_iso() -> void:
