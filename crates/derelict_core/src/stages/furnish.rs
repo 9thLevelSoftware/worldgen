@@ -70,6 +70,70 @@ pub struct FurnishOutcome {
     pub next_entity_id: u32,
 }
 
+/// Door and ladder entities implied by compiled portal edges and verticals.
+/// No lock rolls and no plan mutation — the golden export path.
+pub fn implied_access_entities(
+    topology: &Topology,
+    plan: &StructuralPlan,
+    mut next_entity_id: u32,
+) -> (Vec<EntitySpec>, u32) {
+    let mut entities: Vec<EntitySpec> = Vec::new();
+    let portal_keys: Vec<String> = plan
+        .edges
+        .iter()
+        .filter(|(_, e)| e.portal)
+        .map(|(k, _)| k.clone())
+        .collect();
+    for key in portal_keys {
+        let e = &plan.edges[&key];
+        let (pos, rotation) = door_pos_rotation(e.cell, e.direction);
+        entities.push(EntitySpec {
+            id: next_entity_id,
+            kind: EntityKind::Door,
+            proto: if e.exterior {
+                "airlock_door".into()
+            } else {
+                "door".into()
+            },
+            pos,
+            rotation,
+            locked: false,
+            open: false,
+            inventory: Vec::new(),
+            tags: vec![format!("edge:{key}")],
+        });
+        next_entity_id += 1;
+    }
+    for (vi, v) in topology.verticals.iter().enumerate() {
+        for cell in [v.from_cell, v.to_cell] {
+            entities.push(EntitySpec {
+                id: next_entity_id,
+                kind: EntityKind::Furniture,
+                proto: "ladder".into(),
+                pos: GridPos::new(cell.x, cell.y, cell.deck),
+                rotation: 0,
+                locked: false,
+                open: false,
+                inventory: Vec::new(),
+                tags: vec![format!("shaft_{vi}")],
+            });
+            next_entity_id += 1;
+        }
+    }
+    (entities, next_entity_id)
+}
+
+fn door_pos_rotation(cell: Cell, direction: Dir) -> (GridPos, u8) {
+    // 2D-addon convention: doors sit on the north (rot 0) or west (rot 1)
+    // edge of their tile; canonical east/south edges convert.
+    match direction {
+        Dir::North => (GridPos::new(cell.x, cell.y, cell.deck), 0),
+        Dir::West => (GridPos::new(cell.x, cell.y, cell.deck), 1),
+        Dir::South => (GridPos::new(cell.x, cell.y + 1, cell.deck), 0),
+        Dir::East => (GridPos::new(cell.x + 1, cell.y, cell.deck), 1),
+    }
+}
+
 /// Create door entities (from portal edges), roll locks (written back into
 /// the plan as `Locked` edge kinds), and place furniture per room rules.
 pub fn furnish(

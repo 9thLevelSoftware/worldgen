@@ -34,9 +34,10 @@ cargo run -p derelict_cli -- --sweep 20 --archetype freighter        # summaries
 cargo run -p derelict_cli -- --seed 17 --archetype corvette --export-dir target/export --kit-id ship_structural_v0
 cargo run -p derelict_cli --release -- --stress
 
-# 3. Validate / compile an authored golden area (skips generate; no --author-export)
+# 3. Validate / compile / export an authored golden area (skips generate)
 cargo run -p derelict_cli -- --author-validate crates/derelict_core/assets/golden_areas/airlock_2x2.json
 cargo run -p derelict_cli -- --author-compile crates/derelict_core/assets/golden_areas/airlock_2x2.json
+cargo run -p derelict_cli -- --author-export crates/derelict_core/assets/golden_areas/airlock_2x2.json --export-dir target/export/airlock_2x2
 
 # 4. Build the extension and open the Godot project
 powershell -File scripts\build_windows.ps1
@@ -47,15 +48,38 @@ The generate path also accepts `--out <path>` for a top-down PNG, `--deck <n>`
 or `--all-decks`, `--sweep <count>`, and `--bench`. `--archetype` accepts the
 embedded shuttle, corvette, freighter, and frigate definitions.
 
-`--author-validate` and `--author-compile` are flat clap flags, mutually
-exclusive with each other. When either is set they replace the generate path
-(`--seed`, `--archetype`, `--export-dir`, `--stress`, …). They load a
+`--author-validate`, `--author-compile`, and `--author-export` are flat clap
+flags, mutually exclusive with each other. When any is set they replace the
+generate path (`--seed`, `--archetype`, `--stress`, …). They load a
 `golden_area.json`, adapt it to Topology, compile with `DefaultModulePicker`,
 and run pre-damage validation: `pre_damage([])` for `scope` room/area;
 derelict scope requires both `entry_room` and `goal_room` and a BFS path
 between them. `--author-validate` exits 0 on success and prints issues on
 stderr on failure. `--author-compile` dumps plan JSON plus issues and still
-exits non-zero on failure.
+exits non-zero on failure. `--author-export` writes `layout.json` (schema
+1.2.0) and `gameplay_slice.json` (schema 1.1.0) into `--export-dir` (or
+`<golden-dir>/<id>/` when `--export-dir` is omitted). Export is fail-closed:
+`FloorBadModule`, `ReachabilityBroken`, and unresolved `entry_room` /
+`goal_room` exit non-zero. A committed airlock fixture lives at
+`crates/derelict_core/assets/golden_areas/airlock_2x2/`.
+
+The Synaptic Sea loads those two files with `GeneratedShipLoader.load_from_paths`:
+
+```gdscript
+var loader := GeneratedShipLoader.new()
+var err: String = loader.load_from_paths(
+    "res://data/procgen/golden/airlock_2x2/layout.json",
+    "res://data/procgen/golden/airlock_2x2/gameplay_slice.json"
+)
+if not err.is_empty():
+    push_error(err)
+```
+
+`load_from_documents` is the in-memory equivalent (parsed dictionaries). Room
+ids in the exported documents are golden `stable_id` strings (not numeric
+`RoomId`s). Exterior doors stay plan edges — `layout.portals` is interior-only.
+Loot `contents` are written for explicit stacks; the game honors them after
+the Synaptic Sea follow-up that copies `contents` into loot specs.
 
 The main scene is the **debug viewer**: seed entry, ship class dropdown,
 intactness slider, deck switching, room-graph/damage overlay, plus a

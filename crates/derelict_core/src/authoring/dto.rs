@@ -350,6 +350,39 @@ impl GoldenArea {
         Ok(())
     }
 
+    /// Room/area: missing `goal_room` defaults to entry; missing `entry_room`
+    /// defaults to the first room's `stable_id`. Derelict requires both set.
+    pub fn resolved_entry_goal(&self) -> Result<(String, String), String> {
+        match self.scope {
+            GoldenScope::Derelict => {
+                if self.entry_room.is_empty() || self.goal_room.is_empty() {
+                    return Err("scope derelict requires both entry_room and goal_room".into());
+                }
+                Ok((self.entry_room.clone(), self.goal_room.clone()))
+            }
+            GoldenScope::Room | GoldenScope::Area => {
+                let entry = if self.entry_room.is_empty() {
+                    self.topology
+                        .rooms
+                        .first()
+                        .map(|r| r.stable_id.clone())
+                        .unwrap_or_default()
+                } else {
+                    self.entry_room.clone()
+                };
+                if entry.is_empty() {
+                    return Err("entry_room is empty and no rooms exist".into());
+                }
+                let goal = if self.goal_room.is_empty() {
+                    entry.clone()
+                } else {
+                    self.goal_room.clone()
+                };
+                Ok((entry, goal))
+            }
+        }
+    }
+
     /// Compiler Topology from this document. Duplicate/empty stable_id, unknown
     /// roles, and illegal portal states are load errors.
     pub fn to_topology(&self) -> Result<Topology, String> {

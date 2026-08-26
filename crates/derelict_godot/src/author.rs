@@ -1,5 +1,5 @@
-//! `DerelictAuthor` — compile/validate/palette bridge for the builder.
-//! `DerelictGenerator` is unchanged. Playable export is deferred (PR 11).
+//! `DerelictAuthor` — compile/validate/palette/export bridge for the builder.
+//! `DerelictGenerator` is unchanged.
 
 use crate::coerce::{coerce_golden_value, golden_from_json};
 use derelict_core::authoring::{
@@ -13,7 +13,7 @@ use derelict_core::structural::compile::{
     FLOOR_MODULE, HATCH_MODULE, INNER_CORNER_MODULE, LOCKED_MODULE, OUTER_CORNER_MODULE,
     T_JUNCTION_MODULE, WALL_MODULE,
 };
-use derelict_core::structural::export::structural_plan_to_json;
+use derelict_core::structural::export::{layout_from_golden, structural_plan_to_json};
 use derelict_core::structural::plan::{RoomId, StructuralPlan, Topology, NO_ROOM};
 use derelict_core::structural::sockets::SocketCatalog;
 use derelict_core::structural::validate::{
@@ -363,6 +363,41 @@ impl DerelictAuthor {
         }
     }
 
+    /// Fail-closed playable export. `{layout_json, gameplay_slice_json, error}`.
+    #[func]
+    fn export_playable(&mut self, golden_dict: VarDictionary, kit_id: GString) -> VarDictionary {
+        self.ensure_palettes();
+        match golden_from_dict(&golden_dict) {
+            Err(e) => {
+                godot::global::godot_error!("DerelictAuthor.export_playable: {e}");
+                export_error_dict(&e)
+            }
+            Ok(mut golden) => {
+                let kit = kit_id.to_string();
+                if !kit.is_empty() {
+                    golden.kit_id = kit;
+                }
+                match layout_from_golden(&golden) {
+                    Err(e) => {
+                        godot::global::godot_error!("DerelictAuthor.export_playable: {e}");
+                        export_error_dict(&e)
+                    }
+                    Ok(docs) => {
+                        let layout = serde_json::to_string_pretty(&docs.layout)
+                            .unwrap_or_else(|_| String::new());
+                        let slice = serde_json::to_string_pretty(&docs.gameplay_slice)
+                            .unwrap_or_else(|_| String::new());
+                        let mut d = VarDictionary::new();
+                        d.set("layout_json", layout.as_str());
+                        d.set("gameplay_slice_json", slice.as_str());
+                        d.set("error", "");
+                        d
+                    }
+                }
+            }
+        }
+    }
+
     #[func]
     fn proto_visual(&mut self, proto: GString) -> GString {
         let key = proto.to_string();
@@ -404,6 +439,14 @@ fn load_golden_json(text: &str) -> Result<Value, String> {
 
 fn error_dict(msg: &str) -> VarDictionary {
     let mut d = VarDictionary::new();
+    d.set("error", msg);
+    d
+}
+
+fn export_error_dict(msg: &str) -> VarDictionary {
+    let mut d = VarDictionary::new();
+    d.set("layout_json", "");
+    d.set("gameplay_slice_json", "");
     d.set("error", msg);
     d
 }

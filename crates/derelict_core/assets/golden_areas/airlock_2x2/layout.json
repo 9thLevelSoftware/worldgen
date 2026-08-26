@@ -1,0 +1,1427 @@
+{
+  "arc_zones": [],
+  "biome_id": "",
+  "blocked_links": [],
+  "breach_zones": [],
+  "cell_size": 4.0,
+  "critical_path": [
+    "airlock_01"
+  ],
+  "difficulty_id": "",
+  "document_kind": "ship_layout",
+  "encounters": [],
+  "fire_zones": [],
+  "generator": {
+    "archetype_id": "golden",
+    "cause_of_loss": "Unknown",
+    "fractured": false,
+    "generator_version": 2,
+    "intactness_bp": 10000,
+    "name": "derelict_builder",
+    "seed": 0,
+    "template_id": "airlock_2x2"
+  },
+  "hazard_source": "authored",
+  "kit_id": "ship_structural_v0",
+  "landmarks": [],
+  "portals": [],
+  "program_id": "worldgen-golden-0",
+  "prototype": {
+    "goal_room": "airlock_01",
+    "start_room": "airlock_01"
+  },
+  "room_links": [],
+  "rooms": [
+    {
+      "atmosphere_bp": 8500,
+      "cells": [
+        [
+          0,
+          0
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          1,
+          1
+        ]
+      ],
+      "deck": 0,
+      "depressurized": false,
+      "footprint": [
+        2,
+        2
+      ],
+      "id": "airlock_01",
+      "interior_zones": {
+        "center_slots": [],
+        "reserved_cells": [
+          [
+            0,
+            0
+          ]
+        ],
+        "wall_slots": [
+          [
+            1,
+            0
+          ],
+          [
+            0,
+            1
+          ],
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "room_role": "airlock",
+      "structural_placements": [
+        {
+          "module": "floor_1x1",
+          "name": "floor_cell_x0_z0",
+          "world_position": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "module": "corridor_floor_1x1",
+          "name": "floor_cell_x1_z0",
+          "world_position": [
+            4.0,
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "module": "corridor_floor_1x1",
+          "name": "floor_cell_x0_z1",
+          "world_position": [
+            0.0,
+            0.0,
+            4.0
+          ]
+        },
+        {
+          "module": "corridor_floor_1x1",
+          "name": "floor_cell_x1_z1",
+          "world_position": [
+            4.0,
+            0.0,
+            4.0
+          ]
+        }
+      ]
+    }
+  ],
+  "schema_version": "1.2.0",
+  "structural_plan": {
+    "ceiling_placements": [
+      {
+        "cell": [
+          0,
+          0
+        ],
+        "cell_key": "0|0|0",
+        "deck": 0,
+        "id": "ceiling:0|0|0",
+        "module_id": "ceiling_cap_1x1",
+        "placement_id": "ceiling:0|0|0",
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "room_id": "airlock_01",
+        "room_ids": [
+          "airlock_01"
+        ],
+        "socket_bindings": [],
+        "variant": "intact",
+        "yaw_degrees": 0.0
+      },
+      {
+        "cell": [
+          0,
+          1
+        ],
+        "cell_key": "0|0|1",
+        "deck": 0,
+        "id": "ceiling:0|0|1",
+        "module_id": "ceiling_cap_1x1",
+        "placement_id": "ceiling:0|0|1",
+        "position": [
+          0.0,
+          0.0,
+          4.0
+        ],
+        "room_id": "airlock_01",
+        "room_ids": [
+          "airlock_01"
+        ],
+        "socket_bindings": [],
+        "variant": "intact",
+        "yaw_degrees": 0.0
+      },
+      {
+        "cell": [
+          1,
+          0
+        ],
+        "cell_key": "0|1|0",
+        "deck": 0,
+        "id": "ceiling:0|1|0",
+        "module_id": "ceiling_cap_1x1",
+        "placement_id": "ceiling:0|1|0",
+        "position": [
+          4.0,
+          0.0,
+          0.0
+        ],
+        "room_id": "airlock_01",
+        "room_ids": [
+          "airlock_01"
+        ],
+        "socket_bindings": [],
+        "variant": "intact",
+        "yaw_degrees": 0.0
+      },
+      {
+        "cell": [
+          1,
+          1
+        ],
+        "cell_key": "0|1|1",
+        "deck": 0,
+        "id": "ceiling:0|1|1",
+        "module_id": "ceiling_cap_1x1",
+        "placement_id": "ceiling:0|1|1",
+        "position": [
+          4.0,
+          0.0,
+          4.0
+        ],
+        "room_id": "airlock_01",
+        "room_ids": [
+          "airlock_01"
+        ],
+        "socket_bindings": [],
+        "variant": "intact",
+        "yaw_degrees": 0.0
+      }
+    ],
+    "edges": {
+      "0|h|-1|0": {
+        "cell": [
+          0,
+          0
+        ],
+        "deck": 0,
+        "direction": "north",
+        "edge_key": "0|h|-1|0",
+        "exterior": true,
+        "id": "edge:0|h|-1|0",
+        "key": "0|h|-1|0",
+        "kind": "SOLID",
+        "module_id": "wall_straight_1x1",
+        "opposite_direction": "south",
+        "other_room": "",
+        "owner_room": "airlock_01",
+        "placement_required": true,
+        "portal": false,
+        "position": [
+          0.0,
+          0.0,
+          -2.0
+        ],
+        "room_ids": [
+          "airlock_01",
+          ""
+        ],
+        "socket_bindings": [],
+        "source_cells": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            -1,
+            0
+          ]
+        ],
+        "state": "SOLID",
+        "variant": "intact",
+        "wrapper_required": true,
+        "yaw_degrees": 180.0
+      },
+      "0|h|-1|1": {
+        "cell": [
+          1,
+          0
+        ],
+        "deck": 0,
+        "direction": "north",
+        "edge_key": "0|h|-1|1",
+        "exterior": true,
+        "id": "edge:0|h|-1|1",
+        "key": "0|h|-1|1",
+        "kind": "SOLID",
+        "module_id": "wall_straight_1x1",
+        "opposite_direction": "south",
+        "other_room": "",
+        "owner_room": "airlock_01",
+        "placement_required": true,
+        "portal": false,
+        "position": [
+          4.0,
+          0.0,
+          -2.0
+        ],
+        "room_ids": [
+          "airlock_01",
+          ""
+        ],
+        "socket_bindings": [],
+        "source_cells": [
+          [
+            1,
+            0,
+            0
+          ],
+          [
+            1,
+            -1,
+            0
+          ]
+        ],
+        "state": "SOLID",
+        "variant": "intact",
+        "wrapper_required": true,
+        "yaw_degrees": 180.0
+      },
+      "0|h|0|0": {
+        "cell": [
+          0,
+          0
+        ],
+        "deck": 0,
+        "direction": "south",
+        "edge_key": "0|h|0|0",
+        "exterior": false,
+        "id": "edge:0|h|0|0",
+        "key": "0|h|0|0",
+        "kind": "OPEN",
+        "module_id": "",
+        "opposite_direction": "north",
+        "other_room": "airlock_01",
+        "owner_room": "airlock_01",
+        "placement_required": false,
+        "portal": false,
+        "position": [
+          0.0,
+          0.0,
+          2.0
+        ],
+        "room_ids": [
+          "airlock_01",
+          "airlock_01"
+        ],
+        "socket_bindings": [],
+        "source_cells": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            1,
+            0
+          ]
+        ],
+        "state": "OPEN",
+        "variant": "intact",
+        "wrapper_required": false,
+        "yaw_degrees": 0.0
+      },
+      "0|h|0|1": {
+        "cell": [
+          1,
+          0
+        ],
+        "deck": 0,
+        "direction": "south",
+        "edge_key": "0|h|0|1",
+        "exterior": false,
+        "id": "edge:0|h|0|1",
+        "key": "0|h|0|1",
+        "kind": "OPEN",
+        "module_id": "",
+        "opposite_direction": "north",
+        "other_room": "airlock_01",
+        "owner_room": "airlock_01",
+        "placement_required": false,
+        "portal": false,
+        "position": [
+          4.0,
+          0.0,
+          2.0
+        ],
+        "room_ids": [
+          "airlock_01",
+          "airlock_01"
+        ],
+        "socket_bindings": [],
+        "source_cells": [
+          [
+            1,
+            0,
+            0
+          ],
+          [
+            1,
+            1,
+            0
+          ]
+        ],
+        "state": "OPEN",
+        "variant": "intact",
+        "wrapper_required": false,
+        "yaw_degrees": 0.0
+      },
+      "0|h|1|0": {
+        "cell": [
+          0,
+          1
+        ],
+        "deck": 0,
+        "direction": "south",
+        "edge_key": "0|h|1|0",
+        "exterior": true,
+        "id": "edge:0|h|1|0",
+        "key": "0|h|1|0",
+        "kind": "SOLID",
+        "module_id": "wall_straight_1x1",
+        "opposite_direction": "north",
+        "other_room": "",
+        "owner_room": "airlock_01",
+        "placement_required": true,
+        "portal": false,
+        "position": [
+          0.0,
+          0.0,
+          6.0
+        ],
+        "room_ids": [
+          "airlock_01",
+          ""
+        ],
+        "socket_bindings": [],
+        "source_cells": [
+          [
+            0,
+            1,
+            0
+          ],
+          [
+            0,
+            2,
+            0
+          ]
+        ],
+        "state": "SOLID",
+        "variant": "intact",
+        "wrapper_required": true,
+        "yaw_degrees": 0.0
+      },
+      "0|h|1|1": {
+        "cell": [
+          1,
+          1
+        ],
+        "deck": 0,
+        "direction": "south",
+        "edge_key": "0|h|1|1",
+        "exterior": true,
+        "id": "edge:0|h|1|1",
+        "key": "0|h|1|1",
+        "kind": "SOLID",
+        "module_id": "wall_straight_1x1",
+        "opposite_direction": "north",
+        "other_room": "",
+        "owner_room": "airlock_01",
+        "placement_required": true,
+        "portal": false,
+        "position": [
+          4.0,
+          0.0,
+          6.0
+        ],
+        "room_ids": [
+          "airlock_01",
+          ""
+        ],
+        "socket_bindings": [],
+        "source_cells": [
+          [
+            1,
+            1,
+            0
+          ],
+          [
+            1,
+            2,
+            0
+          ]
+        ],
+        "state": "SOLID",
+        "variant": "intact",
+        "wrapper_required": true,
+        "yaw_degrees": 0.0
+      },
+      "0|v|0|-1": {
+        "cell": [
+          0,
+          0
+        ],
+        "deck": 0,
+        "direction": "west",
+        "edge_key": "0|v|0|-1",
+        "exterior": true,
+        "id": "edge:0|v|0|-1",
+        "key": "0|v|0|-1",
+        "kind": "DOOR",
+        "module_id": "doorway_frame_open_1x1",
+        "opposite_direction": "east",
+        "other_room": "",
+        "owner_room": "airlock_01",
+        "placement_required": true,
+        "portal": true,
+        "position": [
+          -2.0,
+          0.0,
+          0.0
+        ],
+        "room_ids": [
+          "airlock_01",
+          ""
+        ],
+        "socket_bindings": [],
+        "source_cells": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            -1,
+            0,
+            0
+          ]
+        ],
+        "state": "DOOR",
+        "variant": "intact",
+        "wrapper_required": true,
+        "yaw_degrees": 90.0
+      },
+      "0|v|0|0": {
+        "cell": [
+          0,
+          0
+        ],
+        "deck": 0,
+        "direction": "east",
+        "edge_key": "0|v|0|0",
+        "exterior": false,
+        "id": "edge:0|v|0|0",
+        "key": "0|v|0|0",
+        "kind": "OPEN",
+        "module_id": "",
+        "opposite_direction": "west",
+        "other_room": "airlock_01",
+        "owner_room": "airlock_01",
+        "placement_required": false,
+        "portal": false,
+        "position": [
+          2.0,
+          0.0,
+          0.0
+        ],
+        "room_ids": [
+          "airlock_01",
+          "airlock_01"
+        ],
+        "socket_bindings": [],
+        "source_cells": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            1,
+            0,
+            0
+          ]
+        ],
+        "state": "OPEN",
+        "variant": "intact",
+        "wrapper_required": false,
+        "yaw_degrees": 270.0
+      },
+      "0|v|0|1": {
+        "cell": [
+          1,
+          0
+        ],
+        "deck": 0,
+        "direction": "east",
+        "edge_key": "0|v|0|1",
+        "exterior": true,
+        "id": "edge:0|v|0|1",
+        "key": "0|v|0|1",
+        "kind": "SOLID",
+        "module_id": "wall_outer_corner",
+        "opposite_direction": "west",
+        "other_room": "",
+        "owner_room": "airlock_01",
+        "placement_required": true,
+        "portal": false,
+        "position": [
+          6.0,
+          0.0,
+          0.0
+        ],
+        "room_ids": [
+          "airlock_01",
+          ""
+        ],
+        "socket_bindings": [],
+        "source_cells": [
+          [
+            1,
+            0,
+            0
+          ],
+          [
+            2,
+            0,
+            0
+          ]
+        ],
+        "state": "SOLID",
+        "variant": "intact",
+        "wrapper_required": true,
+        "yaw_degrees": 270.0
+      },
+      "0|v|1|-1": {
+        "cell": [
+          0,
+          1
+        ],
+        "deck": 0,
+        "direction": "west",
+        "edge_key": "0|v|1|-1",
+        "exterior": true,
+        "id": "edge:0|v|1|-1",
+        "key": "0|v|1|-1",
+        "kind": "SOLID",
+        "module_id": "wall_outer_corner",
+        "opposite_direction": "east",
+        "other_room": "",
+        "owner_room": "airlock_01",
+        "placement_required": true,
+        "portal": false,
+        "position": [
+          -2.0,
+          0.0,
+          4.0
+        ],
+        "room_ids": [
+          "airlock_01",
+          ""
+        ],
+        "socket_bindings": [],
+        "source_cells": [
+          [
+            0,
+            1,
+            0
+          ],
+          [
+            -1,
+            1,
+            0
+          ]
+        ],
+        "state": "SOLID",
+        "variant": "intact",
+        "wrapper_required": true,
+        "yaw_degrees": 90.0
+      },
+      "0|v|1|0": {
+        "cell": [
+          0,
+          1
+        ],
+        "deck": 0,
+        "direction": "east",
+        "edge_key": "0|v|1|0",
+        "exterior": false,
+        "id": "edge:0|v|1|0",
+        "key": "0|v|1|0",
+        "kind": "OPEN",
+        "module_id": "",
+        "opposite_direction": "west",
+        "other_room": "airlock_01",
+        "owner_room": "airlock_01",
+        "placement_required": false,
+        "portal": false,
+        "position": [
+          2.0,
+          0.0,
+          4.0
+        ],
+        "room_ids": [
+          "airlock_01",
+          "airlock_01"
+        ],
+        "socket_bindings": [],
+        "source_cells": [
+          [
+            0,
+            1,
+            0
+          ],
+          [
+            1,
+            1,
+            0
+          ]
+        ],
+        "state": "OPEN",
+        "variant": "intact",
+        "wrapper_required": false,
+        "yaw_degrees": 270.0
+      },
+      "0|v|1|1": {
+        "cell": [
+          1,
+          1
+        ],
+        "deck": 0,
+        "direction": "east",
+        "edge_key": "0|v|1|1",
+        "exterior": true,
+        "id": "edge:0|v|1|1",
+        "key": "0|v|1|1",
+        "kind": "SOLID",
+        "module_id": "wall_outer_corner",
+        "opposite_direction": "west",
+        "other_room": "",
+        "owner_room": "airlock_01",
+        "placement_required": true,
+        "portal": false,
+        "position": [
+          6.0,
+          0.0,
+          4.0
+        ],
+        "room_ids": [
+          "airlock_01",
+          ""
+        ],
+        "socket_bindings": [],
+        "source_cells": [
+          [
+            1,
+            1,
+            0
+          ],
+          [
+            2,
+            1,
+            0
+          ]
+        ],
+        "state": "SOLID",
+        "variant": "intact",
+        "wrapper_required": true,
+        "yaw_degrees": 270.0
+      }
+    },
+    "errors": [],
+    "floor_placements": [
+      {
+        "cell": [
+          0,
+          0
+        ],
+        "cell_key": "0|0|0",
+        "deck": 0,
+        "id": "floor:0|0|0",
+        "module_id": "floor_1x1",
+        "placement_id": "floor:0|0|0",
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "room_id": "airlock_01",
+        "room_ids": [
+          "airlock_01"
+        ],
+        "socket_bindings": [],
+        "variant": "intact",
+        "yaw_degrees": 0.0
+      },
+      {
+        "cell": [
+          0,
+          1
+        ],
+        "cell_key": "0|0|1",
+        "deck": 0,
+        "id": "floor:0|0|1",
+        "module_id": "corridor_floor_1x1",
+        "placement_id": "floor:0|0|1",
+        "position": [
+          0.0,
+          0.0,
+          4.0
+        ],
+        "room_id": "airlock_01",
+        "room_ids": [
+          "airlock_01"
+        ],
+        "socket_bindings": [],
+        "variant": "intact",
+        "yaw_degrees": 0.0
+      },
+      {
+        "cell": [
+          1,
+          0
+        ],
+        "cell_key": "0|1|0",
+        "deck": 0,
+        "id": "floor:0|1|0",
+        "module_id": "corridor_floor_1x1",
+        "placement_id": "floor:0|1|0",
+        "position": [
+          4.0,
+          0.0,
+          0.0
+        ],
+        "room_id": "airlock_01",
+        "room_ids": [
+          "airlock_01"
+        ],
+        "socket_bindings": [],
+        "variant": "intact",
+        "yaw_degrees": 0.0
+      },
+      {
+        "cell": [
+          1,
+          1
+        ],
+        "cell_key": "0|1|1",
+        "deck": 0,
+        "id": "floor:0|1|1",
+        "module_id": "corridor_floor_1x1",
+        "placement_id": "floor:0|1|1",
+        "position": [
+          4.0,
+          0.0,
+          4.0
+        ],
+        "room_id": "airlock_01",
+        "room_ids": [
+          "airlock_01"
+        ],
+        "socket_bindings": [],
+        "variant": "intact",
+        "yaw_degrees": 0.0
+      }
+    ],
+    "occupancy": {
+      "0|0|0": {
+        "cell": [
+          0,
+          0
+        ],
+        "cell_key": "0|0|0",
+        "decal": 0,
+        "deck": 0,
+        "module_id": "floor_1x1",
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "room_id": "airlock_01",
+        "room_ids": [
+          "airlock_01"
+        ],
+        "variant": "intact"
+      },
+      "0|0|1": {
+        "cell": [
+          0,
+          1
+        ],
+        "cell_key": "0|0|1",
+        "decal": 0,
+        "deck": 0,
+        "module_id": "corridor_floor_1x1",
+        "position": [
+          0.0,
+          0.0,
+          4.0
+        ],
+        "room_id": "airlock_01",
+        "room_ids": [
+          "airlock_01"
+        ],
+        "variant": "intact"
+      },
+      "0|1|0": {
+        "cell": [
+          1,
+          0
+        ],
+        "cell_key": "0|1|0",
+        "decal": 0,
+        "deck": 0,
+        "module_id": "corridor_floor_1x1",
+        "position": [
+          4.0,
+          0.0,
+          0.0
+        ],
+        "room_id": "airlock_01",
+        "room_ids": [
+          "airlock_01"
+        ],
+        "variant": "intact"
+      },
+      "0|1|1": {
+        "cell": [
+          1,
+          1
+        ],
+        "cell_key": "0|1|1",
+        "decal": 0,
+        "deck": 0,
+        "module_id": "corridor_floor_1x1",
+        "position": [
+          4.0,
+          0.0,
+          4.0
+        ],
+        "room_id": "airlock_01",
+        "room_ids": [
+          "airlock_01"
+        ],
+        "variant": "intact"
+      }
+    },
+    "placements": [
+      {
+        "cell": [
+          0,
+          0
+        ],
+        "deck": 0,
+        "direction": "north",
+        "edge_key": "0|h|-1|0",
+        "exterior": true,
+        "id": "edge:0|h|-1|0",
+        "key": "0|h|-1|0",
+        "kind": "SOLID",
+        "module_id": "wall_straight_1x1",
+        "opposite_direction": "south",
+        "other_room": "",
+        "owner_room": "airlock_01",
+        "placement_id": "edge:0|h|-1|0",
+        "placement_required": true,
+        "portal": false,
+        "position": [
+          0.0,
+          0.0,
+          -2.0
+        ],
+        "room_ids": [
+          "airlock_01",
+          ""
+        ],
+        "socket_bindings": [],
+        "source_cells": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            -1,
+            0
+          ]
+        ],
+        "state": "SOLID",
+        "variant": "intact",
+        "wrapper_required": true,
+        "yaw_degrees": 180.0
+      },
+      {
+        "cell": [
+          1,
+          0
+        ],
+        "deck": 0,
+        "direction": "north",
+        "edge_key": "0|h|-1|1",
+        "exterior": true,
+        "id": "edge:0|h|-1|1",
+        "key": "0|h|-1|1",
+        "kind": "SOLID",
+        "module_id": "wall_straight_1x1",
+        "opposite_direction": "south",
+        "other_room": "",
+        "owner_room": "airlock_01",
+        "placement_id": "edge:0|h|-1|1",
+        "placement_required": true,
+        "portal": false,
+        "position": [
+          4.0,
+          0.0,
+          -2.0
+        ],
+        "room_ids": [
+          "airlock_01",
+          ""
+        ],
+        "socket_bindings": [],
+        "source_cells": [
+          [
+            1,
+            0,
+            0
+          ],
+          [
+            1,
+            -1,
+            0
+          ]
+        ],
+        "state": "SOLID",
+        "variant": "intact",
+        "wrapper_required": true,
+        "yaw_degrees": 180.0
+      },
+      {
+        "cell": [
+          0,
+          1
+        ],
+        "deck": 0,
+        "direction": "south",
+        "edge_key": "0|h|1|0",
+        "exterior": true,
+        "id": "edge:0|h|1|0",
+        "key": "0|h|1|0",
+        "kind": "SOLID",
+        "module_id": "wall_straight_1x1",
+        "opposite_direction": "north",
+        "other_room": "",
+        "owner_room": "airlock_01",
+        "placement_id": "edge:0|h|1|0",
+        "placement_required": true,
+        "portal": false,
+        "position": [
+          0.0,
+          0.0,
+          6.0
+        ],
+        "room_ids": [
+          "airlock_01",
+          ""
+        ],
+        "socket_bindings": [],
+        "source_cells": [
+          [
+            0,
+            1,
+            0
+          ],
+          [
+            0,
+            2,
+            0
+          ]
+        ],
+        "state": "SOLID",
+        "variant": "intact",
+        "wrapper_required": true,
+        "yaw_degrees": 0.0
+      },
+      {
+        "cell": [
+          1,
+          1
+        ],
+        "deck": 0,
+        "direction": "south",
+        "edge_key": "0|h|1|1",
+        "exterior": true,
+        "id": "edge:0|h|1|1",
+        "key": "0|h|1|1",
+        "kind": "SOLID",
+        "module_id": "wall_straight_1x1",
+        "opposite_direction": "north",
+        "other_room": "",
+        "owner_room": "airlock_01",
+        "placement_id": "edge:0|h|1|1",
+        "placement_required": true,
+        "portal": false,
+        "position": [
+          4.0,
+          0.0,
+          6.0
+        ],
+        "room_ids": [
+          "airlock_01",
+          ""
+        ],
+        "socket_bindings": [],
+        "source_cells": [
+          [
+            1,
+            1,
+            0
+          ],
+          [
+            1,
+            2,
+            0
+          ]
+        ],
+        "state": "SOLID",
+        "variant": "intact",
+        "wrapper_required": true,
+        "yaw_degrees": 0.0
+      },
+      {
+        "cell": [
+          0,
+          0
+        ],
+        "deck": 0,
+        "direction": "west",
+        "edge_key": "0|v|0|-1",
+        "exterior": true,
+        "id": "edge:0|v|0|-1",
+        "key": "0|v|0|-1",
+        "kind": "DOOR",
+        "module_id": "doorway_frame_open_1x1",
+        "opposite_direction": "east",
+        "other_room": "",
+        "owner_room": "airlock_01",
+        "placement_id": "edge:0|v|0|-1",
+        "placement_required": true,
+        "portal": true,
+        "position": [
+          -2.0,
+          0.0,
+          0.0
+        ],
+        "room_ids": [
+          "airlock_01",
+          ""
+        ],
+        "socket_bindings": [],
+        "source_cells": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            -1,
+            0,
+            0
+          ]
+        ],
+        "state": "DOOR",
+        "variant": "intact",
+        "wrapper_required": true,
+        "yaw_degrees": 90.0
+      },
+      {
+        "cell": [
+          1,
+          0
+        ],
+        "deck": 0,
+        "direction": "east",
+        "edge_key": "0|v|0|1",
+        "exterior": true,
+        "id": "edge:0|v|0|1",
+        "key": "0|v|0|1",
+        "kind": "SOLID",
+        "module_id": "wall_outer_corner",
+        "opposite_direction": "west",
+        "other_room": "",
+        "owner_room": "airlock_01",
+        "placement_id": "edge:0|v|0|1",
+        "placement_required": true,
+        "portal": false,
+        "position": [
+          6.0,
+          0.0,
+          0.0
+        ],
+        "room_ids": [
+          "airlock_01",
+          ""
+        ],
+        "socket_bindings": [],
+        "source_cells": [
+          [
+            1,
+            0,
+            0
+          ],
+          [
+            2,
+            0,
+            0
+          ]
+        ],
+        "state": "SOLID",
+        "variant": "intact",
+        "wrapper_required": true,
+        "yaw_degrees": 270.0
+      },
+      {
+        "cell": [
+          0,
+          1
+        ],
+        "deck": 0,
+        "direction": "west",
+        "edge_key": "0|v|1|-1",
+        "exterior": true,
+        "id": "edge:0|v|1|-1",
+        "key": "0|v|1|-1",
+        "kind": "SOLID",
+        "module_id": "wall_outer_corner",
+        "opposite_direction": "east",
+        "other_room": "",
+        "owner_room": "airlock_01",
+        "placement_id": "edge:0|v|1|-1",
+        "placement_required": true,
+        "portal": false,
+        "position": [
+          -2.0,
+          0.0,
+          4.0
+        ],
+        "room_ids": [
+          "airlock_01",
+          ""
+        ],
+        "socket_bindings": [],
+        "source_cells": [
+          [
+            0,
+            1,
+            0
+          ],
+          [
+            -1,
+            1,
+            0
+          ]
+        ],
+        "state": "SOLID",
+        "variant": "intact",
+        "wrapper_required": true,
+        "yaw_degrees": 90.0
+      },
+      {
+        "cell": [
+          1,
+          1
+        ],
+        "deck": 0,
+        "direction": "east",
+        "edge_key": "0|v|1|1",
+        "exterior": true,
+        "id": "edge:0|v|1|1",
+        "key": "0|v|1|1",
+        "kind": "SOLID",
+        "module_id": "wall_outer_corner",
+        "opposite_direction": "west",
+        "other_room": "",
+        "owner_room": "airlock_01",
+        "placement_id": "edge:0|v|1|1",
+        "placement_required": true,
+        "portal": false,
+        "position": [
+          6.0,
+          0.0,
+          4.0
+        ],
+        "room_ids": [
+          "airlock_01",
+          ""
+        ],
+        "socket_bindings": [],
+        "source_cells": [
+          [
+            1,
+            1,
+            0
+          ],
+          [
+            2,
+            1,
+            0
+          ]
+        ],
+        "state": "SOLID",
+        "variant": "intact",
+        "wrapper_required": true,
+        "yaw_degrees": 270.0
+      }
+    ],
+    "socket_bindings": [
+      {
+        "kind": "floor_edge",
+        "neighbor_placement_id": "edge:0|h|-1|0",
+        "neighbor_socket_id": "wall_base_01",
+        "placement_id": "floor:0|0|0",
+        "socket_id": "floor_edge_north_01"
+      },
+      {
+        "kind": "wall_base",
+        "neighbor_placement_id": "floor:0|0|0",
+        "neighbor_socket_id": "floor_edge_north_01",
+        "placement_id": "edge:0|h|-1|0",
+        "socket_id": "wall_base_01"
+      },
+      {
+        "kind": "floor_edge",
+        "neighbor_placement_id": "edge:0|v|0|-1",
+        "neighbor_socket_id": "wall_base_01",
+        "placement_id": "floor:0|0|0",
+        "socket_id": "floor_edge_west_01"
+      },
+      {
+        "kind": "wall_base",
+        "neighbor_placement_id": "floor:0|0|0",
+        "neighbor_socket_id": "floor_edge_west_01",
+        "placement_id": "edge:0|v|0|-1",
+        "socket_id": "wall_base_01"
+      },
+      {
+        "kind": "floor_edge",
+        "neighbor_placement_id": "edge:0|h|1|0",
+        "neighbor_socket_id": "wall_base_01",
+        "placement_id": "floor:0|0|1",
+        "socket_id": "floor_edge_south_01"
+      },
+      {
+        "kind": "wall_base",
+        "neighbor_placement_id": "floor:0|0|1",
+        "neighbor_socket_id": "floor_edge_south_01",
+        "placement_id": "edge:0|h|1|0",
+        "socket_id": "wall_base_01"
+      },
+      {
+        "kind": "floor_edge",
+        "neighbor_placement_id": "edge:0|v|1|-1",
+        "neighbor_socket_id": "wall_base_01",
+        "placement_id": "floor:0|0|1",
+        "socket_id": "floor_edge_west_01"
+      },
+      {
+        "kind": "wall_base",
+        "neighbor_placement_id": "floor:0|0|1",
+        "neighbor_socket_id": "floor_edge_west_01",
+        "placement_id": "edge:0|v|1|-1",
+        "socket_id": "wall_base_01"
+      },
+      {
+        "kind": "floor_edge",
+        "neighbor_placement_id": "edge:0|h|-1|1",
+        "neighbor_socket_id": "wall_base_01",
+        "placement_id": "floor:0|1|0",
+        "socket_id": "floor_edge_north_01"
+      },
+      {
+        "kind": "wall_base",
+        "neighbor_placement_id": "floor:0|1|0",
+        "neighbor_socket_id": "floor_edge_north_01",
+        "placement_id": "edge:0|h|-1|1",
+        "socket_id": "wall_base_01"
+      },
+      {
+        "kind": "floor_edge",
+        "neighbor_placement_id": "edge:0|v|0|1",
+        "neighbor_socket_id": "wall_base_01",
+        "placement_id": "floor:0|1|0",
+        "socket_id": "floor_edge_east_01"
+      },
+      {
+        "kind": "wall_base",
+        "neighbor_placement_id": "floor:0|1|0",
+        "neighbor_socket_id": "floor_edge_east_01",
+        "placement_id": "edge:0|v|0|1",
+        "socket_id": "wall_base_01"
+      },
+      {
+        "kind": "floor_edge",
+        "neighbor_placement_id": "edge:0|v|1|1",
+        "neighbor_socket_id": "wall_base_01",
+        "placement_id": "floor:0|1|1",
+        "socket_id": "floor_edge_east_01"
+      },
+      {
+        "kind": "wall_base",
+        "neighbor_placement_id": "floor:0|1|1",
+        "neighbor_socket_id": "floor_edge_east_01",
+        "placement_id": "edge:0|v|1|1",
+        "socket_id": "wall_base_01"
+      },
+      {
+        "kind": "floor_edge",
+        "neighbor_placement_id": "edge:0|h|1|1",
+        "neighbor_socket_id": "wall_base_01",
+        "placement_id": "floor:0|1|1",
+        "socket_id": "floor_edge_south_01"
+      },
+      {
+        "kind": "wall_base",
+        "neighbor_placement_id": "floor:0|1|1",
+        "neighbor_socket_id": "floor_edge_south_01",
+        "placement_id": "edge:0|h|1|1",
+        "socket_id": "wall_base_01"
+      }
+    ]
+  },
+  "vertical_connections": []
+}
