@@ -21,7 +21,7 @@ use crate::structural::plan::{
 use crate::structural::project::project_to_raster;
 use crate::structural::validate::{validate, ValidationPolicy};
 use serde_json::{json, Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Stable, human-readable room id string ("airlock_01" style).
 pub fn room_name(role: Role, id: RoomId) -> String {
@@ -454,7 +454,7 @@ pub fn layout_from_golden(golden: &GoldenArea) -> Result<PlayableExport, String>
     let critical_path = match golden.scope {
         GoldenScope::Derelict => {
             derelict_bfs(&topology, entry_room, goal_room).ok_or_else(|| {
-                format!("ReachabilityBroken: no BFS path from '{entry_sid}' to '{goal_sid}'")
+                format!("CriticalPathBroken: no BFS path from '{entry_sid}' to '{goal_sid}'")
             })?
         }
         GoldenScope::Room | GoldenScope::Area => vec![entry_room],
@@ -518,7 +518,7 @@ pub fn layout_from_golden(golden: &GoldenArea) -> Result<PlayableExport, String>
     };
     let mut layout = to_layout_json_named(&ship, &opts, &names);
     let mut gameplay_slice = to_gameplay_slice_json_named(&ship, &names);
-    overlay_authored(&mut layout, &mut gameplay_slice, golden);
+    overlay_authored(&mut layout, &mut gameplay_slice, golden)?;
     Ok(PlayableExport {
         layout,
         gameplay_slice,
@@ -587,7 +587,11 @@ fn prop_to_entity(prop: &AuthoredProp, id: u32, items: &ItemRegistry) -> EntityS
     }
 }
 
-fn overlay_authored(layout: &mut Value, slice: &mut Value, golden: &GoldenArea) {
+fn overlay_authored(
+    layout: &mut Value,
+    slice: &mut Value,
+    golden: &GoldenArea,
+) -> Result<(), String> {
     if let Some(gen) = layout.get_mut("generator").and_then(Value::as_object_mut) {
         gen.insert("name".into(), json!("derelict_builder"));
     }
@@ -606,18 +610,28 @@ fn overlay_authored(layout: &mut Value, slice: &mut Value, golden: &GoldenArea) 
             link_zones_json(&golden.hazards.breach_zones),
         );
     }
+
+    let mut vars_by_name: BTreeMap<&str, &crate::authoring::RoomVars> = BTreeMap::new();
+    let mut vented: Vec<Value> = Vec::new();
+    let mut seen_cid: BTreeSet<&str> = BTreeSet::new();
+    for room in &golden.topology.rooms {
+        if let Some(vars) = golden.room_vars.get(&room.id.to_string()) {
+            vars_by_name.insert(room.stable_id.as_str(), vars);
+            if vars.vented {
+                if let Some(cid) = compartment_for_role(&room.role) {
+                    if seen_cid.insert(cid) {
+                        vented.push(json!(cid));
+                    }
+                }
+            }
+        }
+    }
     if let Some(obj) = slice.as_object_mut() {
         obj.insert(
             "fire_zones".into(),
             link_zones_json(&golden.hazards.fire_zones),
         );
-    }
-
-    let mut vars_by_name: BTreeMap<&str, &crate::authoring::RoomVars> = BTreeMap::new();
-    for room in &golden.topology.rooms {
-        if let Some(vars) = golden.room_vars.get(&room.id.to_string()) {
-            vars_by_name.insert(room.stable_id.as_str(), vars);
-        }
+        obj.insert("vented_compartments".into(), Value::Array(vented));
     }
     if let Some(rooms) = layout.get_mut("rooms").and_then(Value::as_array_mut) {
         for room in rooms {
@@ -634,7 +648,18 @@ fn overlay_authored(layout: &mut Value, slice: &mut Value, golden: &GoldenArea) 
         }
     }
 
-    overlay_loot_contents(slice, golden);
+    overlay_loot_contents(slice, golden)
+}
+
+/// Loader `COMPARTMENT_FOR_ROLE`. Unmapped roles stay visual-only.
+fn compartment_for_role(role: &str) -> Option<&'static str> {
+    match role {
+        "bridge" | "cockpit" => Some("bridge"),
+        "engineering" | "reactor" | "engine_bay" => Some("engineering"),
+        "hydroponics" => Some("hydroponics"),
+        "cargo" | "storage" => Some("cargo"),
+        _ => None,
+    }
 }
 
 fn link_zones_json(zones: &[LinkZone]) -> Value {
@@ -656,61 +681,146 @@ fn link_zone_json(z: &LinkZone) -> Value {
     })
 }
 
-fn overlay_loot_contents(slice: &mut Value, golden: &GoldenArea) {
+fn overlay_loot_contents(slice: &mut Value, golden: &GoldenArea) -> Result<(), String> {
+    if slice
+        .get("loot_containers")
+        .and_then(Value::as_array)
+        .is_none()
+    {
+        if let Some(obj) = slice.as_object_mut() {
+            obj.insert("loot_containers".into(), json!([]));
+        }
+    }
     let Some(containers) = slice
         .get_mut("loot_containers")
         .and_then(Value::as_array_mut)
     else {
-        return;
+        return Ok(());
     };
-    for container in containers {
-        let Some(approach) = container.get("approach_cell").and_then(Value::as_array) else {
+
+    for container in containers.iter_mut() {
+        let Some(cell) = approach_cell_of(container) else {
             continue;
         };
-        if approach.len() < 3 {
-            continue;
-        }
-        let Some(x) = approach[0].as_i64() else {
-            continue;
-        };
-        let Some(y) = approach[1].as_i64() else {
-            continue;
-        };
-        let Some(deck) = approach[2].as_i64() else {
-            continue;
-        };
-        let cell = [x as i32, y as i32, deck as i32];
         let Some(prop) = golden
             .props
             .iter()
-            .find(|p| p.kind == EntityKind::Container && p.cell == cell)
+            .find(|p| holds_loot(p.kind) && p.cell == cell)
         else {
             continue;
         };
         let Some(obj) = container.as_object_mut() else {
             continue;
         };
-        match prop.inventory_mode {
-            InventoryMode::Explicit => {
-                let contents: Vec<Value> = prop
-                    .inventory
-                    .iter()
-                    .map(|s| json!({ "item_id": s.item_id, "qty": s.qty }))
-                    .collect();
-                obj.insert("contents".into(), Value::Array(contents));
-                let table = prop
-                    .loot_table
-                    .as_deref()
-                    .filter(|t| !t.is_empty())
-                    .unwrap_or("authored_explicit");
-                obj.insert("loot_table".into(), json!(table));
-            }
-            InventoryMode::LootTable => {
-                if let Some(table) = prop.loot_table.as_ref().filter(|t| !t.is_empty()) {
-                    obj.insert("loot_table".into(), json!(table));
-                }
-            }
-            InventoryMode::Empty => {}
+        apply_loot_overlay(obj, prop);
+    }
+
+    // Serializer only emits Containers (generate_ship hash-stable). Explicit
+    // ItemPiles are appended here so playable goldens still carry contents.
+    let mut extra: Vec<Value> = Vec::new();
+    for prop in &golden.props {
+        if prop.kind != EntityKind::ItemPile || prop.inventory_mode != InventoryMode::Explicit {
+            continue;
+        }
+        if containers
+            .iter()
+            .any(|c| approach_cell_of(c) == Some(prop.cell))
+        {
+            continue;
+        }
+        let Some(room_id) = room_stable_at(golden, prop.cell) else {
+            continue;
+        };
+        extra.push(itempile_loot_row(prop, &room_id));
+    }
+    containers.extend(extra);
+
+    for prop in &golden.props {
+        if !holds_loot(prop.kind) || prop.inventory_mode != InventoryMode::Explicit {
+            continue;
+        }
+        if !containers
+            .iter()
+            .any(|c| approach_cell_of(c) == Some(prop.cell))
+        {
+            return Err(format!(
+                "explicit {:?} '{}' has no matching loot_containers row (cell {:?})",
+                prop.kind, prop.proto, prop.cell
+            ));
         }
     }
+    Ok(())
+}
+
+fn holds_loot(kind: EntityKind) -> bool {
+    matches!(kind, EntityKind::Container | EntityKind::ItemPile)
+}
+
+fn approach_cell_of(v: &Value) -> Option<[i32; 3]> {
+    let a = v.get("approach_cell")?.as_array()?;
+    if a.len() < 3 {
+        return None;
+    }
+    Some([
+        a[0].as_i64()? as i32,
+        a[1].as_i64()? as i32,
+        a[2].as_i64()? as i32,
+    ])
+}
+
+fn room_stable_at(golden: &GoldenArea, cell: [i32; 3]) -> Option<String> {
+    let deck = u8::try_from(cell[2]).ok()?;
+    golden
+        .topology
+        .rooms
+        .iter()
+        .find(|r| r.deck == deck && r.cells.iter().any(|c| c[0] == cell[0] && c[1] == cell[1]))
+        .map(|r| r.stable_id.clone())
+}
+
+fn apply_loot_overlay(obj: &mut Map<String, Value>, prop: &AuthoredProp) {
+    match prop.inventory_mode {
+        InventoryMode::Explicit => {
+            obj.insert("contents".into(), loot_contents_json(prop));
+            obj.insert("loot_table".into(), json!(explicit_table(prop)));
+        }
+        InventoryMode::LootTable => {
+            if let Some(table) = prop.loot_table.as_ref().filter(|t| !t.is_empty()) {
+                obj.insert("loot_table".into(), json!(table));
+            }
+        }
+        InventoryMode::Empty => {
+            // Do not leave the serializer's worldgen_seeded stamp on an
+            // authored-empty container — the loader would roll loot.
+            obj.insert("loot_table".into(), json!("authored_empty"));
+            obj.insert("contents".into(), json!([]));
+        }
+    }
+}
+
+fn explicit_table(prop: &AuthoredProp) -> &str {
+    prop.loot_table
+        .as_deref()
+        .filter(|t| !t.is_empty())
+        .unwrap_or("authored_explicit")
+}
+
+fn loot_contents_json(prop: &AuthoredProp) -> Value {
+    Value::Array(
+        prop.inventory
+            .iter()
+            .map(|s| json!({ "item_id": s.item_id, "qty": s.qty }))
+            .collect(),
+    )
+}
+
+fn itempile_loot_row(prop: &AuthoredProp, room_id: &str) -> Value {
+    json!({
+        "id": format!("itempile_{}", prop.id),
+        "kind": prop.proto,
+        "room_id": room_id,
+        "approach_cell": prop.cell,
+        "loot_table": explicit_table(prop),
+        "contents": loot_contents_json(prop),
+    })
 }

@@ -50,5 +50,6 @@
   "program_id": "worldgen-golden-0",
   "schema_version": "1.1.0",
   "start_room": "airlock_01",
-  "summary": "worldgen golden seed 0 intactness 1.00 (Unknown)"
+  "summary": "worldgen golden seed 0 intactness 1.00 (Unknown)",
+  "vented_compartments": []
 }

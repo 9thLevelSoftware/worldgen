@@ -1,6 +1,10 @@
 //! Playable layout.json + gameplay_slice.json export from GoldenArea.
 
-use derelict_core::authoring::GoldenArea;
+use derelict_core::authoring::{
+    AuthoredProp, AuthoredStack, GoldenArea, GoldenScope, InventoryMode, LinkZone, PortalIntentDto,
+    RoomSpecDto, RoomVars,
+};
+use derelict_core::model::EntityKind;
 use derelict_core::structural::export::layout_from_golden;
 use derelict_core::structural::validate::FLOOR_MODULES;
 use serde_json::Value;
@@ -98,10 +102,204 @@ fn missing_goal_defaults_to_entry_for_room_scope() {
 #[test]
 fn derelict_scope_requires_entry_and_goal() {
     let mut golden = sample();
-    golden.scope = derelict_core::authoring::GoldenScope::Derelict;
+    golden.scope = GoldenScope::Derelict;
     golden.goal_room.clear();
     let err = layout_from_golden(&golden).expect_err("derelict requires goal");
     assert!(err.contains("derelict"), "{err}");
+}
+
+#[test]
+fn derelict_disconnected_is_critical_path_broken() {
+    let mut golden = two_room_area();
+    golden.scope = GoldenScope::Derelict;
+    golden.topology.portals.retain(|p| p.exterior);
+    let err = layout_from_golden(&golden).expect_err("disconnected derelict");
+    assert!(
+        err.contains("CriticalPathBroken"),
+        "expected CriticalPathBroken, got {err}"
+    );
+    assert!(
+        !err.contains("ReachabilityBroken"),
+        "occupancy reachability is a different code: {err}"
+    );
+}
+
+#[test]
+fn empty_container_does_not_keep_worldgen_seeded() {
+    let mut golden = sample();
+    golden.props[0].inventory_mode = InventoryMode::Empty;
+    golden.props[0].inventory.clear();
+    let docs = layout_from_golden(&golden).expect("empty container exports");
+    let loot = docs.gameplay_slice["loot_containers"]
+        .as_array()
+        .expect("loot");
+    assert_eq!(loot.len(), 1);
+    assert_eq!(loot[0]["loot_table"], "authored_empty");
+    assert_eq!(loot[0]["contents"], serde_json::json!([]));
+    assert_ne!(loot[0]["loot_table"], "worldgen_seeded");
+}
+
+#[test]
+fn explicit_void_cell_prop_refuses_export() {
+    let mut golden = sample();
+    golden.props.push(explicit_container(99, [9, 9, 0]));
+    let err = layout_from_golden(&golden).expect_err("void-cell explicit loot");
+    assert!(
+        err.contains("loot_containers") || err.contains("no matching"),
+        "{err}"
+    );
+}
+
+#[test]
+fn explicit_item_pile_appended_to_loot_containers() {
+    let mut golden = sample();
+    golden.topology.rooms[0].cells = vec![
+        [0, 0],
+        [1, 0],
+        [2, 0],
+        [0, 1],
+        [1, 1],
+        [2, 1],
+        [0, 2],
+        [1, 2],
+        [2, 2],
+    ];
+    golden.props.push(AuthoredProp {
+        id: 2,
+        kind: EntityKind::ItemPile,
+        proto: "scrap_pile".into(),
+        visual_id: String::new(),
+        cell: [1, 1, 0],
+        rotation: 0,
+        facing: None,
+        locked: false,
+        inventory_mode: InventoryMode::Explicit,
+        inventory: vec![AuthoredStack {
+            item_id: "scrap_metal".into(),
+            qty: 3,
+        }],
+        loot_table: None,
+    });
+    let docs = layout_from_golden(&golden).expect("item pile export");
+    let loot = docs.gameplay_slice["loot_containers"]
+        .as_array()
+        .expect("loot");
+    let pile = loot
+        .iter()
+        .find(|c| c["kind"] == "scrap_pile")
+        .expect("appended ItemPile row");
+    assert_eq!(pile["room_id"], "airlock_01");
+    let cell = pile["approach_cell"].as_array().expect("approach_cell");
+    assert_eq!(cell.len(), 3);
+    assert_eq!(cell[0], 1);
+    assert_eq!(cell[1], 1);
+    assert_eq!(cell[2], 0);
+    assert_eq!(pile["contents"][0]["item_id"], "scrap_metal");
+    assert_eq!(pile["contents"][0]["qty"], 3);
+    assert!(loot.iter().any(|c| c["kind"] == "suit_locker"));
+}
+
+#[test]
+fn two_room_interior_portal_and_fire_zone() {
+    let golden = two_room_area();
+    let docs = layout_from_golden(&golden).expect("two-room export");
+    let portals = docs.layout["portals"].as_array().expect("portals");
+    assert_eq!(portals.len(), 1, "exactly one interior portal: {portals:?}");
+    let from = portals[0]["from_room"].as_str().expect("from_room string");
+    let to = portals[0]["to_room"].as_str().expect("to_room string");
+    assert_eq!(from, "airlock_01");
+    assert_eq!(to, "cargo_01");
+    assert!(
+        !portals
+            .iter()
+            .any(|p| p["to_room"] == "" || p["to_room"] == 0),
+        "exterior must not appear in portals: {portals:?}"
+    );
+
+    let zones = docs.layout["fire_zones"].as_array().expect("layout fire");
+    assert_eq!(zones.len(), 1);
+    let from_cell = zones[0]["from_cell"].as_array().expect("from_cell");
+    assert_eq!(from_cell.len(), 3, "LinkZone from_cell is [x,y,deck]");
+    let to_cell = zones[0]["to_cell"].as_array().expect("to_cell");
+    assert_eq!(to_cell.len(), 3);
+    assert_eq!(zones[0]["from_room"], "airlock_01");
+    assert_eq!(zones[0]["to_room"], "cargo_01");
+    let slice_zones = docs.gameplay_slice["fire_zones"]
+        .as_array()
+        .expect("slice fire");
+    assert_eq!(slice_zones.len(), 1);
+    assert_eq!(
+        slice_zones[0]["from_cell"].as_array().map(|c| c.len()),
+        Some(3)
+    );
+
+    assert_eq!(
+        docs.gameplay_slice["vented_compartments"],
+        serde_json::json!(["cargo"])
+    );
+}
+
+fn two_room_area() -> GoldenArea {
+    let mut golden = sample();
+    golden.scope = GoldenScope::Area;
+    golden.goal_room = "cargo_01".into();
+    golden.topology.rooms.push(RoomSpecDto {
+        id: 2,
+        stable_id: "cargo_01".into(),
+        role: "cargo".into(),
+        deck: 0,
+        cells: vec![[2, 0], [3, 0], [2, 1], [3, 1]],
+    });
+    golden.topology.portals.push(PortalIntentDto {
+        from_room: 1,
+        to_room: 2,
+        from_cell: [1, 0, 0],
+        to_cell: [2, 0, 0],
+        state: "DOOR".into(),
+        exterior: false,
+    });
+    golden.hazards.fire_zones.push(LinkZone {
+        id: "fire_01".into(),
+        from_room: "airlock_01".into(),
+        to_room: "cargo_01".into(),
+        from_cell: [1, 0, 0],
+        to_cell: [2, 0, 0],
+        module_id: String::new(),
+        kind: "timed_fire".into(),
+        compartment_id: "cargo".into(),
+        rationale: "test overlay".into(),
+    });
+    golden.room_vars.insert(
+        "2".into(),
+        RoomVars {
+            oxygen_bp: 8000,
+            depressurized: false,
+            vented: true,
+            radiation_bp: 0,
+            temperature_c: 18,
+            notes: String::new(),
+        },
+    );
+    golden
+}
+
+fn explicit_container(id: u32, cell: [i32; 3]) -> AuthoredProp {
+    AuthoredProp {
+        id,
+        kind: EntityKind::Container,
+        proto: "crate".into(),
+        visual_id: String::new(),
+        cell,
+        rotation: 0,
+        facing: None,
+        locked: false,
+        inventory_mode: InventoryMode::Explicit,
+        inventory: vec![AuthoredStack {
+            item_id: "scrap_metal".into(),
+            qty: 1,
+        }],
+        loot_table: None,
+    }
 }
 
 /// StructuralPlanValidator-equivalent: string room ids on layout + plan.
@@ -199,4 +397,5 @@ fn assert_overlays(layout: &Value, slice: &Value) {
     assert!(layout["arc_zones"].as_array().unwrap().is_empty());
     assert!(layout["breach_zones"].as_array().unwrap().is_empty());
     assert!(slice["fire_zones"].as_array().unwrap().is_empty());
+    assert_eq!(slice["vented_compartments"], serde_json::json!([]));
 }
