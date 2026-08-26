@@ -1468,6 +1468,7 @@ func _sync_pending_anchor() -> void:
 func _place_cell_ghost(cell: Vector3i, reason: String, ok_text: String) -> void:
 	_ghost.visible = true
 	_ghost.position = _center(cell.x, cell.y, cell.z)
+	_ghost.rotation_degrees = Vector3.ZERO
 	var gmesh := _ghost.mesh as BoxMesh
 	if gmesh:
 		gmesh.size = Vector3(CELL_SIZE_M - 0.05, 0.16, CELL_SIZE_M - 0.05)
@@ -1482,6 +1483,7 @@ func _place_cell_ghost(cell: Vector3i, reason: String, ok_text: String) -> void:
 
 func _place_edge_ghost(a: Vector3i, b: Vector3i, reason: String, ok_text: String) -> void:
 	_ghost.visible = true
+	_ghost.rotation_degrees = Vector3.ZERO
 	var pa := _center(a.x, a.y, a.z)
 	var pb := _center(b.x, b.y, b.z)
 	_ghost.position = (pa + pb) * 0.5 + Vector3(0, 0.7, 0)
@@ -1918,23 +1920,66 @@ func _ingest_solids(plan: Dictionary) -> void:
 		var kind := str(rec.get("kind", rec.get("state", "")))
 		if kind != "SOLID":
 			continue
-		var deck := int(rec.get("deck", 0))
-		var cell_v: Variant = rec.get("cell", [])
-		var x := 0
-		var y := 0
-		if cell_v is Array and (cell_v as Array).size() >= 2:
-			x = int(cell_v[0])
-			y = int(cell_v[1])
-			if (cell_v as Array).size() >= 3:
-				deck = int(cell_v[2])
 		var dir := str(rec.get("direction", ""))
 		if dir.is_empty():
 			continue
-		var key := _key(Vector3i(x, y, deck))
-		var arr: Array = _solid_dirs.get(key, [])
-		if arr.find(dir) < 0:
-			arr.append(dir)
-		_solid_dirs[key] = arr
+		var owner := _edge_owner_cell(rec)
+		_add_solid_dir(owner, dir)
+		# Compile stores the undirected edge once on the BTreeMap-first cell.
+		# The other occupied side is still a wall_slot and faces the opposite Dir.
+		var other := _edge_other_cell(rec, owner)
+		if other != owner and _occupancy.has(_key(other)):
+			var opp := str(rec.get("opposite_direction", ""))
+			if opp.is_empty():
+				opp = _opposite_dir(dir)
+			_add_solid_dir(other, opp)
+
+
+func _edge_owner_cell(rec: Dictionary) -> Vector3i:
+	var deck := int(rec.get("deck", 0))
+	var cell_v: Variant = rec.get("cell", [])
+	if cell_v is Array and (cell_v as Array).size() >= 2:
+		var a: Array = cell_v
+		var x := int(a[0])
+		var y := int(a[1])
+		if a.size() >= 3:
+			deck = int(a[2])
+		return Vector3i(x, y, deck)
+	return Vector3i.ZERO
+
+
+func _edge_other_cell(rec: Dictionary, owner: Vector3i) -> Vector3i:
+	var src: Variant = rec.get("source_cells", [])
+	if not (src is Array) or (src as Array).size() < 2:
+		return owner
+	var other := _xyz_cell((src as Array)[1])
+	if other == owner:
+		other = _xyz_cell((src as Array)[0])
+	return other
+
+
+func _add_solid_dir(cell: Vector3i, dir: String) -> void:
+	if dir.is_empty():
+		return
+	var key := _key(cell)
+	var arr: Array = _solid_dirs.get(key, [])
+	if arr.find(dir) < 0:
+		arr.append(dir)
+	_solid_dirs[key] = arr
+
+
+func _opposite_dir(dir: String) -> String:
+	match dir:
+		"north":
+			return "south"
+		"south":
+			return "north"
+		"east":
+			return "west"
+		"west":
+			return "east"
+		_:
+			return ""
 
 
 func _prune_props() -> bool:

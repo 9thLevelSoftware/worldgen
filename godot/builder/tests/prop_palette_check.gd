@@ -9,6 +9,7 @@ var _failed := false
 func _initialize() -> void:
 	_check_palette()
 	_check_snap()
+	_check_shared_solid_facing()
 	_check_preview()
 	_check_compile_airlock()
 	if _failed:
@@ -187,6 +188,56 @@ func _check_snap() -> void:
 	if not lattice.get_armed_prop().is_empty():
 		_fail("Door palette arm should be refused")
 	print("SNAP_OK reserved/wall/center/one-per-cell/inspect/facing/rotate")
+	lattice.free()
+
+
+func _check_shared_solid_facing() -> void:
+	var Lattice := load("res://scripts/OccupancyLattice.gd")
+	var lattice = Lattice.new()
+	root.add_child(lattice)
+	lattice.active_role = "airlock"
+	if not lattice.paint_cell(Vector3i(0, 0, 0)):
+		_fail("paint west room cell")
+	lattice.create_room()
+	if not lattice.paint_cell(Vector3i(1, 0, 0)):
+		_fail("paint east room cell")
+	lattice.set_tool(Lattice.TOOL_PROP)
+	lattice.arm_prop({
+		"group": "furnishing",
+		"role": "airlock",
+		"proto": "suit_locker",
+		"kind": "Container",
+		"place": "WallAdjacent",
+		"visual_id": "generic_locker",
+		"wall_adjacent": true,
+	})
+	# Compile emits the partition once on the BTreeMap-first cell (west, dir east).
+	lattice.set_compile_result({
+		"airlock_01": {"reserved_cells": [], "wall_slots": [[0, 0, 0]], "center_slots": []},
+		"airlock_02": {"reserved_cells": [], "wall_slots": [[1, 0, 0]], "center_slots": []},
+	}, {
+		"edges": {
+			"shared": {
+				"cell": [0, 0],
+				"deck": 0,
+				"direction": "east",
+				"opposite_direction": "west",
+				"kind": "SOLID",
+				"source_cells": [[0, 0, 0], [1, 0, 0]],
+			}
+		}
+	}, true)
+	# East cell, west band of the shared wall.
+	var west_band := Vector3(1.0 * 4.0 - 1.9, 0.0, 0.0)
+	if not lattice.try_place_prop(Vector3i(1, 0, 0), west_band):
+		_fail("east wall_slot should accept a prop against the shared SOLID")
+	var props: Array = lattice.get_props()
+	if props.is_empty():
+		_fail("shared SOLID place produced no prop")
+	elif str(props[0].get("facing", "")) != "west":
+		_fail("east cell west band should face west, got %s" % props[0].get("facing", ""))
+	else:
+		print("SHARED_SOLID_OK east cell west band facing=west")
 	lattice.free()
 
 
