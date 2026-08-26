@@ -7,6 +7,8 @@
 use godot::prelude::*;
 
 mod async_gen;
+mod author;
+mod coerce;
 mod convert;
 
 mod generator;
