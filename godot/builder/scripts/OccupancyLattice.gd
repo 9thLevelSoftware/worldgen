@@ -7,9 +7,13 @@ signal occupancy_changed
 signal room_selected(room: Dictionary)
 signal portal_selected(portal: Dictionary)
 signal vertical_selected(vertical: Dictionary)
+signal prop_selected(prop: Dictionary)
+signal props_changed
 signal deck_changed(deck: int)
 signal hover_info(text: String)
 signal tool_changed(tool: String)
+
+const _PALETTE := preload("res://scripts/PaletteDock.gd")
 
 const CELL_SIZE_M := 4.0
 const DECK_HEIGHT_M := 4.0
@@ -33,6 +37,7 @@ const ROLES: PackedStringArray = [
 const TOOL_PAINT := "paint"
 const TOOL_PORTAL := "portal"
 const TOOL_VERTICAL := "vertical"
+const TOOL_PROP := "prop"
 
 ## EdgeKind::name() portal states only (not SOLID/OPEN).
 const PORTAL_STATES: PackedStringArray = ["DOOR", "LOCKED", "HATCH", "BREACH"]
@@ -78,11 +83,22 @@ var _rooms: Array[Dictionary] = []
 var _occupancy: Dictionary = {} # "deck|x|y" -> room id
 var _portals: Array[Dictionary] = []
 var _verticals: Array[Dictionary] = []
+var _props: Array[Dictionary] = []
 var _selected_id: int = 0
 var _selected_kind: String = "room"
 var _selected_portal: int = -1
 var _selected_vertical: int = -1
+var _selected_prop: int = -1
 var _next_id: int = 1
+var _next_prop_id: int = 1
+var _armed_prop: Dictionary = {}
+var _prop_ready := false
+var _show_slots := false
+var _rotation_offset: int = 0
+var _reserved: Dictionary = {}
+var _wall_slots: Dictionary = {}
+var _center_slots: Dictionary = {}
+var _solid_dirs: Dictionary = {} # cell key -> PackedStringArray
 var _has_pending := false
 var _pending_cell := Vector3i.ZERO
 
@@ -93,6 +109,8 @@ var _floor_boxes: Dictionary = {} # "deck|x|y" -> CSGBox3D
 var _links: Node3D
 var _portal_boxes: Dictionary = {}
 var _vertical_boxes: Dictionary = {}
+var _slots: Node3D
+var _slot_boxes: Dictionary = {}
 var _grid: MeshInstance3D
 var _ghost: MeshInstance3D
 var _anchor: MeshInstance3D
@@ -152,6 +170,39 @@ func get_selected_vertical() -> Dictionary:
 	if _selected_kind == "vertical" and _selected_vertical >= 0 and _selected_vertical < _verticals.size():
 		return _verticals[_selected_vertical].duplicate(true)
 	return {}
+
+
+func get_props() -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	for p in _props:
+		out.append(_prop_dto(p))
+	return out
+
+
+func get_selected_prop() -> Dictionary:
+	if _selected_kind == "prop" and _selected_prop >= 0 and _selected_prop < _props.size():
+		return _prop_dto(_props[_selected_prop])
+	return {}
+
+
+func get_armed_prop() -> Dictionary:
+	return _armed_prop.duplicate(true)
+
+
+func is_prop_ready() -> bool:
+	return _prop_ready
+
+
+func is_reserved_cell(cell: Vector3i) -> bool:
+	return _reserved.has(_key(cell))
+
+
+func is_wall_slot_cell(cell: Vector3i) -> bool:
+	return _wall_slots.has(_key(cell))
+
+
+func is_center_slot_cell(cell: Vector3i) -> bool:
+	return _center_slots.has(_key(cell))
 
 
 func is_iso() -> bool:
@@ -214,6 +265,7 @@ func create_room() -> void:
 	_selected_kind = "room"
 	_selected_portal = -1
 	_selected_vertical = -1
+	_selected_prop = -1
 	_sync_floors()
 	_sync_links()
 	room_selected.emit({})
@@ -221,12 +273,46 @@ func create_room() -> void:
 
 ## Re-applying the same tool still resets the pending click (plain buttons).
 func set_tool(tool: String) -> void:
-	if tool != TOOL_PAINT and tool != TOOL_PORTAL and tool != TOOL_VERTICAL:
+	if tool != TOOL_PAINT and tool != TOOL_PORTAL and tool != TOOL_VERTICAL and tool != TOOL_PROP:
 		return
 	active_tool = tool
 	_cancel_pending()
+	_sync_slots()
 	_refresh_ghost()
 	tool_changed.emit(active_tool)
+
+
+func arm_prop(entry: Dictionary) -> void:
+	if str(entry.get("kind", "")) == "Door" or str(entry.get("kind", "")).to_lower() == "door":
+		_armed_prop = {}
+		return
+	_armed_prop = entry.duplicate(true)
+	_rotation_offset = 0
+	_refresh_ghost()
+
+
+func set_slot_overlay_visible(visible: bool) -> void:
+	_show_slots = visible
+	_sync_slots()
+
+
+func set_compile_result(zones: Dictionary, plan: Dictionary, ok: bool) -> void:
+	_prop_ready = ok
+	_ingest_zones(zones)
+	_ingest_solids(plan)
+	var pruned := _prune_props()
+	_sync_slots()
+	_refresh_ghost()
+	if pruned:
+		props_changed.emit()
+		if _selected_kind == "prop":
+			_emit_selection()
+
+
+func try_place_prop(cell: Vector3i, hit: Vector3 = Vector3.ZERO) -> bool:
+	if hit != Vector3.ZERO:
+		_last_hit = hit
+	return _try_lmb_prop(cell)
 
 
 func stamp_portal_state(state: String) -> void:
@@ -291,7 +377,73 @@ func remove_selected_link() -> bool:
 	if _selected_kind == "vertical":
 		remove_selected_vertical()
 		return true
+	if _selected_kind == "prop":
+		remove_selected_prop()
+		return true
 	return false
+
+
+func remove_selected_prop() -> void:
+	if _selected_kind != "prop" or _selected_prop < 0 or _selected_prop >= _props.size():
+		return
+	_props.remove_at(_selected_prop)
+	_selected_prop = -1
+	_selected_kind = "room"
+	props_changed.emit()
+	_emit_selection()
+
+
+func remove_prop_at(cell: Vector3i) -> bool:
+	var idx := prop_index_at(cell)
+	if idx < 0:
+		return false
+	var was_selected := _selected_kind == "prop" and _selected_prop == idx
+	_props.remove_at(idx)
+	if _selected_prop == idx:
+		_selected_prop = -1
+		_selected_kind = "room"
+	elif _selected_prop > idx:
+		_selected_prop -= 1
+	props_changed.emit()
+	if was_selected:
+		_emit_selection()
+	return true
+
+
+func prop_index_at(cell: Vector3i) -> int:
+	for i in _props.size():
+		if _xyz_cell(_props[i].get("cell", [])) == cell:
+			return i
+	return -1
+
+
+func cycle_prop_rotation(reverse: bool = false) -> bool:
+	var delta := -1 if reverse else 1
+	if _selected_kind == "prop" and _selected_prop >= 0 and _selected_prop < _props.size():
+		var prop: Dictionary = _props[_selected_prop]
+		prop["rotation"] = posmod(int(prop.get("rotation", 0)) + delta, 4)
+		props_changed.emit()
+		prop_selected.emit(_prop_dto(prop))
+		return true
+	if active_tool == TOOL_PROP and not _armed_prop.is_empty():
+		_rotation_offset = posmod(_rotation_offset + delta, 4)
+		_refresh_ghost()
+		return true
+	return false
+
+
+func apply_prop_edit(edited: Dictionary) -> void:
+	if _selected_kind != "prop" or _selected_prop < 0 or _selected_prop >= _props.size():
+		return
+	var prop: Dictionary = _props[_selected_prop]
+	if edited.has("locked"):
+		prop["locked"] = bool(edited["locked"])
+	if edited.has("rotation"):
+		var rot := int(edited["rotation"])
+		if rot >= 0 and rot <= 3:
+			prop["rotation"] = rot
+	props_changed.emit()
+	prop_selected.emit(_prop_dto(prop))
 
 
 func cancel_pending() -> void:
@@ -304,13 +456,14 @@ func cancel_pending() -> void:
 
 func stamp_role(role: String) -> void:
 	active_role = role
-	# Role palette is a room stamp. Drop portal/vertical selection so the
+	# Role palette is a room stamp. Drop portal/vertical/prop selection so the
 	# inspector and Delete/Backspace match the highlighted room.
-	var converted := _selected_kind == "portal" or _selected_kind == "vertical"
+	var converted := _selected_kind == "portal" or _selected_kind == "vertical" or _selected_kind == "prop"
 	if converted:
 		_selected_kind = "room"
 		_selected_portal = -1
 		_selected_vertical = -1
+		_selected_prop = -1
 	var room := get_selected()
 	if room.is_empty():
 		if converted:
@@ -353,6 +506,7 @@ func select_room_id(id: int) -> void:
 	_selected_kind = "room"
 	_selected_portal = -1
 	_selected_vertical = -1
+	_selected_prop = -1
 	_sync_floors()
 	_sync_links()
 	room_selected.emit(get_selected())
@@ -379,6 +533,7 @@ func set_active_deck(deck: int) -> void:
 	_rebuild_grid()
 	_sync_floors()
 	_sync_links()
+	_sync_slots()
 	_apply_camera()
 	_refresh_ghost()
 	deck_changed.emit(active_deck)
@@ -428,7 +583,10 @@ func handle_gui_input(event: InputEvent, viewport: SubViewport) -> void:
 			_accept(host)
 		elif mb.button_index == MOUSE_BUTTON_RIGHT:
 			if mb.pressed:
-				if _has_pending and not _occupancy.has(_key(c)):
+				if active_tool == TOOL_PROP:
+					if not remove_prop_at(c):
+						hover_info.emit("no prop on (%d,%d) deck %d" % [c.x, c.y, c.z])
+				elif _has_pending and not _occupancy.has(_key(c)):
 					cancel_pending()
 				else:
 					_erase_cell(c)
@@ -454,7 +612,7 @@ func handle_gui_input(event: InputEvent, viewport: SubViewport) -> void:
 		_update_ghost(c)
 		if _lmb and _paint_drag and active_tool == TOOL_PAINT:
 			_try_paint(c)
-		elif _rmb:
+		elif _rmb and active_tool != TOOL_PROP:
 			_erase_cell(c)
 
 
@@ -495,6 +653,10 @@ func _build_world() -> void:
 	_links = Node3D.new()
 	_links.name = "Links"
 	add_child(_links)
+
+	_slots = Node3D.new()
+	_slots.name = "Slots"
+	add_child(_slots)
 
 	_grid = MeshInstance3D.new()
 	_grid.name = "Grid"
@@ -598,6 +760,9 @@ func _try_lmb(cell: Vector3i) -> bool:
 		TOOL_VERTICAL:
 			_try_lmb_vertical(cell)
 			return false
+		TOOL_PROP:
+			_try_lmb_prop(cell)
+			return false
 		_:
 			return _try_lmb_paint(cell)
 
@@ -639,6 +804,7 @@ func _try_paint(cell: Vector3i) -> bool:
 	_selected_kind = "room"
 	_selected_portal = -1
 	_selected_vertical = -1
+	_selected_prop = -1
 	_prune_links()
 	_sync_deck_count()
 	_sync_floors()
@@ -685,9 +851,12 @@ func _erase_cell(cell: Vector3i) -> void:
 			leftover.append(split)
 	_rooms = leftover
 	_prune_links()
+	var pruned := _prune_props()
 	_sync_floors()
 	_sync_links()
 	occupancy_changed.emit()
+	if pruned:
+		props_changed.emit()
 	_emit_selection()
 
 
@@ -833,6 +1002,8 @@ func _update_ghost(cell: Vector3i) -> void:
 			_update_portal_ghost(cell)
 		TOOL_VERTICAL:
 			_update_vertical_ghost(cell)
+		TOOL_PROP:
+			_update_prop_ghost(cell)
 		_:
 			_update_paint_ghost(cell)
 
@@ -1253,9 +1424,13 @@ func _emit_selection() -> void:
 	if _selected_kind == "vertical" and _selected_vertical >= 0 and _selected_vertical < _verticals.size():
 		vertical_selected.emit(_verticals[_selected_vertical].duplicate(true))
 		return
+	if _selected_kind == "prop" and _selected_prop >= 0 and _selected_prop < _props.size():
+		prop_selected.emit(_prop_dto(_props[_selected_prop]))
+		return
 	_selected_kind = "room"
 	_selected_portal = -1
 	_selected_vertical = -1
+	_selected_prop = -1
 	room_selected.emit(get_selected())
 
 
@@ -1273,6 +1448,7 @@ func _begin_pending(cell: Vector3i) -> void:
 	_selected_kind = "room"
 	_selected_portal = -1
 	_selected_vertical = -1
+	_selected_prop = -1
 	if _occupancy.has(_key(cell)):
 		_selected_id = int(_occupancy[_key(cell)])
 	_sync_pending_anchor()
@@ -1541,3 +1717,332 @@ func _rebuild_grid() -> void:
 		im.surface_add_vertex(Vector3(t, y, float(AABB_MAX + 1) * CELL_SIZE_M))
 	im.surface_end()
 	_grid.mesh = im
+
+
+func _try_lmb_prop(cell: Vector3i) -> bool:
+	var existing := prop_index_at(cell)
+	if existing >= 0:
+		# Re-click inspects; never restamp the same cell.
+		_select_prop(existing)
+		return false
+	if _armed_prop.is_empty():
+		hover_info.emit("select a palette proto first")
+		return false
+	var reason := _prop_block_reason(cell, _armed_prop)
+	if reason != "":
+		hover_info.emit(reason)
+		return false
+	_place_prop(cell, _armed_prop)
+	return true
+
+
+func _select_prop(index: int) -> void:
+	if index < 0 or index >= _props.size():
+		return
+	_selected_kind = "prop"
+	_selected_prop = index
+	_selected_portal = -1
+	_selected_vertical = -1
+	var cell := _xyz_cell(_props[index].get("cell", []))
+	if _occupancy.has(_key(cell)):
+		_selected_id = int(_occupancy[_key(cell)])
+	_sync_floors()
+	_sync_links()
+	prop_selected.emit(_prop_dto(_props[index]))
+
+
+func _place_prop(cell: Vector3i, entry: Dictionary) -> void:
+	var facing := _facing_for(cell, _last_hit)
+	var base_rot := _PALETTE.rotation_from_facing(facing) if facing != "" else 0
+	var kind := _PALETTE.kind_or_skip_door(str(entry.get("kind", "Furniture")))
+	if kind.is_empty():
+		hover_info.emit("blocked: doors are implied by portals")
+		return
+	var visual := str(entry.get("visual_id", ""))
+	var proto := str(entry.get("proto", entry.get("id", "")))
+	var prop := {
+		"id": _next_prop_id,
+		"kind": kind,
+		"proto": proto,
+		"visual_id": visual,
+		"cell": _cell_xyz(cell),
+		"rotation": posmod(base_rot + _rotation_offset, 4),
+		"facing": facing if facing != "" else null,
+		"locked": false,
+		"inventory_mode": "empty",
+		"inventory": [],
+		"loot_table": null,
+		"wall_adjacent": _PALETTE.is_wall_adjacent(entry),
+		"stand_in": _PALETTE.is_stand_in(entry),
+		"visual_scene_path": str(entry.get("visual_scene_path", "")),
+		"primitive": str(entry.get("primitive", "")),
+		"albedo": str(entry.get("albedo", "")),
+		"place": str(entry.get("place", "")),
+		"group": str(entry.get("group", "")),
+	}
+	_next_prop_id += 1
+	_props.append(prop)
+	_selected_kind = "prop"
+	_selected_prop = _props.size() - 1
+	_selected_portal = -1
+	_selected_vertical = -1
+	if _occupancy.has(_key(cell)):
+		_selected_id = int(_occupancy[_key(cell)])
+	_sync_floors()
+	props_changed.emit()
+	prop_selected.emit(_prop_dto(prop))
+
+
+func _prop_block_reason(cell: Vector3i, entry: Dictionary) -> String:
+	if not _prop_ready:
+		return "blocked: compile must succeed before props"
+	if str(entry.get("kind", "")) == "Door" or str(entry.get("kind", "")).to_lower() == "door":
+		return "blocked: doors are implied by portals"
+	var key := _key(cell)
+	if not _occupancy.has(key):
+		return "blocked: unoccupied"
+	if _reserved.has(key):
+		return "blocked: doorway-adjacent / vertical reserved"
+	if prop_index_at(cell) >= 0:
+		return "blocked: one prop per cell"
+	var wall_adj := _PALETTE.is_wall_adjacent(entry)
+	if wall_adj and not _wall_slots.has(key):
+		return "blocked: wall-adjacent proto refuses center slots"
+	if not _wall_slots.has(key) and not _center_slots.has(key):
+		return "blocked: not a wall or center slot"
+	var need_role := str(entry.get("role", ""))
+	if not need_role.is_empty():
+		var have := _room_role(int(_occupancy[key]))
+		if have != need_role:
+			return "blocked: proto is for %s, cell is %s" % [need_role, have]
+	return ""
+
+
+func _facing_for(cell: Vector3i, hit: Vector3) -> String:
+	var solids: Array = _solid_dirs.get(_key(cell), [])
+	var clicked := _hit_dir(cell, hit)
+	if clicked != "" and solids.has(clicked):
+		return clicked
+	return _PALETTE.first_solid_dir(solids)
+
+
+func _hit_dir(cell: Vector3i, hit: Vector3) -> String:
+	var half := CELL_SIZE_M * 0.5
+	var lx := hit.x - float(cell.x) * CELL_SIZE_M + half
+	var lz := hit.z - float(cell.y) * CELL_SIZE_M + half
+	var band := 1.05
+	var best := ""
+	var best_d := band
+	if lx < band:
+		var d: float = lx
+		if d < best_d:
+			best_d = d
+			best = "west"
+	if lx > CELL_SIZE_M - band:
+		var d2: float = CELL_SIZE_M - lx
+		if d2 < best_d:
+			best_d = d2
+			best = "east"
+	if lz < band:
+		var d3: float = lz
+		if d3 < best_d:
+			best_d = d3
+			best = "north"
+	if lz > CELL_SIZE_M - band:
+		var d4: float = CELL_SIZE_M - lz
+		if d4 < best_d:
+			best = "south"
+	return best
+
+
+func _update_prop_ghost(cell: Vector3i) -> void:
+	var existing := prop_index_at(cell)
+	if existing >= 0:
+		_ghost.visible = false
+		hover_info.emit("select %s  (%d,%d deck %d)" % [
+			str(_props[existing].get("proto", "prop")), cell.x, cell.y, cell.z
+		])
+		return
+	if _armed_prop.is_empty():
+		_ghost.visible = false
+		hover_info.emit("select a palette proto")
+		return
+	var reason := _prop_block_reason(cell, _armed_prop)
+	var facing := _facing_for(cell, _last_hit)
+	var rot := posmod(_PALETTE.rotation_from_facing(facing) + _rotation_offset, 4)
+	var ok := "place %s rot %d" % [str(_armed_prop.get("proto", "")), rot]
+	if facing != "":
+		ok += " facing %s" % facing
+	if _PALETTE.is_stand_in(_armed_prop):
+		ok += " (preview stand-in)"
+	_place_cell_ghost(cell, reason, ok)
+	if _ghost.visible:
+		_ghost.position = _center(cell.x, cell.y, cell.z) + Vector3(0, 0.6, 0)
+		var gmesh := _ghost.mesh as BoxMesh
+		if gmesh:
+			gmesh.size = Vector3(0.9, 1.1, 0.9)
+		_ghost.rotation_degrees = Vector3(0, float(rot) * 90.0, 0)
+
+
+func _ingest_zones(zones: Dictionary) -> void:
+	_reserved.clear()
+	_wall_slots.clear()
+	_center_slots.clear()
+	for room_key in zones:
+		var z: Variant = zones[room_key]
+		if not (z is Dictionary):
+			continue
+		var rec: Dictionary = z
+		_ingest_cell_list(rec.get("reserved_cells", []), _reserved)
+		_ingest_cell_list(rec.get("wall_slots", []), _wall_slots)
+		_ingest_cell_list(rec.get("center_slots", []), _center_slots)
+
+
+func _ingest_cell_list(cells: Variant, into: Dictionary) -> void:
+	if not (cells is Array):
+		return
+	for c in cells:
+		into[_key(_xyz_cell(c))] = true
+
+
+func _ingest_solids(plan: Dictionary) -> void:
+	_solid_dirs.clear()
+	var edges: Variant = plan.get("edges", {})
+	if not (edges is Dictionary):
+		return
+	for edge_key in edges:
+		var rec_v: Variant = edges[edge_key]
+		if not (rec_v is Dictionary):
+			continue
+		var rec: Dictionary = rec_v
+		var kind := str(rec.get("kind", rec.get("state", "")))
+		if kind != "SOLID":
+			continue
+		var deck := int(rec.get("deck", 0))
+		var cell_v: Variant = rec.get("cell", [])
+		var x := 0
+		var y := 0
+		if cell_v is Array and (cell_v as Array).size() >= 2:
+			x = int(cell_v[0])
+			y = int(cell_v[1])
+			if (cell_v as Array).size() >= 3:
+				deck = int(cell_v[2])
+		var dir := str(rec.get("direction", ""))
+		if dir.is_empty():
+			continue
+		var key := _key(Vector3i(x, y, deck))
+		var arr: Array = _solid_dirs.get(key, [])
+		if arr.find(dir) < 0:
+			arr.append(dir)
+		_solid_dirs[key] = arr
+
+
+func _prune_props() -> bool:
+	var next: Array[Dictionary] = []
+	var changed := false
+	var keep_sel := -1
+	for i in _props.size():
+		var p: Dictionary = _props[i]
+		var cell := _xyz_cell(p.get("cell", []))
+		var key := _key(cell)
+		var drop := false
+		if not _occupancy.has(key):
+			drop = true
+		elif _prop_ready and _reserved.has(key):
+			drop = true
+		elif _prop_ready and bool(p.get("wall_adjacent", false)) and not _wall_slots.has(key):
+			drop = true
+		elif _prop_ready and not _wall_slots.has(key) and not _center_slots.has(key):
+			drop = true
+		if drop:
+			changed = true
+			continue
+		if _selected_kind == "prop" and i == _selected_prop:
+			keep_sel = next.size()
+		next.append(p)
+	_props = next
+	if _selected_kind == "prop":
+		_selected_prop = keep_sel
+		if _selected_prop < 0:
+			_selected_kind = "room"
+	return changed
+
+
+func _prop_dto(prop: Dictionary) -> Dictionary:
+	var facing: Variant = prop.get("facing", null)
+	if facing is String and str(facing).is_empty():
+		facing = null
+	var loot: Variant = prop.get("loot_table", null)
+	if loot is String and str(loot).is_empty():
+		loot = null
+	# AuthoredProp fields only. Extra preview keys stay in-memory on `_props`.
+	return {
+		"id": int(prop.get("id", 0)),
+		"kind": str(prop.get("kind", "Furniture")),
+		"proto": str(prop.get("proto", "")),
+		"visual_id": str(prop.get("visual_id", "")),
+		"cell": prop.get("cell", [0, 0, 0]),
+		"rotation": int(prop.get("rotation", 0)),
+		"facing": facing,
+		"locked": bool(prop.get("locked", false)),
+		"inventory_mode": str(prop.get("inventory_mode", "empty")),
+		"inventory": prop.get("inventory", []),
+		"loot_table": loot,
+	}
+
+
+func _sync_slots() -> void:
+	if _slots == null:
+		return
+	_slots.visible = _show_slots and _prop_ready
+	if not _slots.visible:
+		return
+	var wanted: Dictionary = {}
+	for key in _reserved:
+		wanted[key] = "reserved"
+	for key in _wall_slots:
+		wanted[key] = "wall"
+	for key in _center_slots:
+		wanted[key] = "center"
+	var stale: Array = []
+	for key in _slot_boxes:
+		if not wanted.has(key):
+			stale.append(key)
+	for key in stale:
+		var old: CSGBox3D = _slot_boxes[key]
+		_slots.remove_child(old)
+		old.free()
+		_slot_boxes.erase(key)
+	for key in wanted:
+		var kind: String = wanted[key]
+		var cell := _cell_from_key(str(key))
+		var box: CSGBox3D
+		if _slot_boxes.has(key):
+			box = _slot_boxes[key]
+		else:
+			box = CSGBox3D.new()
+			box.use_collision = false
+			box.size = Vector3(CELL_SIZE_M - 0.35, 0.08, CELL_SIZE_M - 0.35)
+			box.position = _center(cell.x, cell.y, cell.z) + Vector3(0, 0.12, 0)
+			box.material = StandardMaterial3D.new()
+			_slots.add_child(box)
+			_slot_boxes[key] = box
+		_style_slot_box(box, kind, cell.z)
+
+
+func _style_slot_box(box: CSGBox3D, kind: String, deck: int) -> void:
+	var col := Color(0.95, 0.28, 0.28, 0.28)
+	match kind:
+		"wall":
+			col = Color(0.95, 0.72, 0.22, 0.28)
+		"center":
+			col = Color(0.28, 0.85, 0.95, 0.28)
+	if deck != active_deck:
+		col.a = 0.08 if deck > active_deck else 0.14
+	var mat := box.material as StandardMaterial3D
+	if mat == null:
+		mat = StandardMaterial3D.new()
+		box.material = mat
+	mat.albedo_color = col
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED

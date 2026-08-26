@@ -9,11 +9,13 @@ const COMPILE_DEBOUNCE_S := 0.05
 var author
 var golden: Dictionary = {}
 var _room_vars: Dictionary = {}
+var _palettes: Dictionary = {}
 var _content_offline := true
 var _doc_id := "untitled"
 var _display_name := "Untitled"
 var _entry_room := ""
 var _goal_room := ""
+var _compile_ok := false
 var _compile_timer: Timer
 
 @onready var _banner: PanelContainer = %Banner
@@ -22,8 +24,14 @@ var _compile_timer: Timer
 @onready var _deck_label: Label = %DeckLabel
 @onready var _iso_btn: Button = %IsoBtn
 @onready var _tool_list: VBoxContainer = %ToolList
+@onready var _state_title: Label = %StateTitle
 @onready var _state_list: VBoxContainer = %StateList
 @onready var _role_list: VBoxContainer = %RoleList
+@onready var _role_scroll: ScrollContainer = $VBox/Body/LeftDock/RoleScroll
+@onready var _role_title: Label = $VBox/Body/LeftDock/LeftTitle
+@onready var _tools_title: Label = $VBox/Body/LeftDock/ToolsTitle
+@onready var _new_room_btn: Button = %NewRoomBtn
+@onready var _palette = %PaletteDock
 @onready var _room_list: ItemList = %RoomList
 @onready var _view: SubViewportContainer = %View
 @onready var _viewport: SubViewport = %SubViewport
@@ -47,6 +55,7 @@ func _ready() -> void:
 	_resolve_content()
 	_schedule_compile()
 	_sync_deck_label()
+	_apply_phase(0)
 	_status.text = "Paint LMB · RMB erase · Portal: click A then neighbor · Vertical: stacked N/N±1 · Del removes selected portal/vertical · Esc cancels pending · Q/E deck"
 
 
@@ -63,6 +72,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 		KEY_DELETE, KEY_BACKSPACE:
 			if _lattice.remove_selected_link():
+				get_viewport().set_input_as_handled()
+		KEY_R:
+			if _lattice.cycle_prop_rotation(event.shift_pressed):
 				get_viewport().set_input_as_handled()
 		KEY_Q, KEY_BRACKETLEFT:
 			_lattice.nudge_deck(-1)
@@ -84,6 +96,8 @@ func _wire() -> void:
 	_lattice.room_selected.connect(_on_room_selected)
 	_lattice.portal_selected.connect(_on_portal_selected)
 	_lattice.vertical_selected.connect(_on_vertical_selected)
+	_lattice.prop_selected.connect(_on_prop_selected)
+	_lattice.props_changed.connect(_on_props_changed)
 	_lattice.tool_changed.connect(func(_t: String) -> void: _highlight_armed_tool())
 	_lattice.deck_changed.connect(_on_deck_changed)
 	_lattice.hover_info.connect(func(t: String) -> void: _status.text = t)
@@ -91,6 +105,10 @@ func _wire() -> void:
 	_inspector.portal_edited.connect(_on_portal_edited)
 	_inspector.portal_removed.connect(func() -> void: _lattice.remove_selected_portal())
 	_inspector.vertical_removed.connect(func() -> void: _lattice.remove_selected_vertical())
+	_inspector.prop_edited.connect(func(p: Dictionary) -> void: _lattice.apply_prop_edit(p))
+	_inspector.prop_removed.connect(func() -> void: _lattice.remove_selected_prop())
+	_palette.prop_armed.connect(func(e: Dictionary) -> void: _lattice.arm_prop(e))
+	_phase_bar.tab_changed.connect(_on_phase_tab)
 	_room_list.item_selected.connect(_on_room_list_selected)
 	_compile_timer = Timer.new()
 	_compile_timer.one_shot = true
@@ -108,6 +126,37 @@ func _build_phases() -> void:
 	_phase_bar.set_tab_disabled(2, true)
 	_phase_bar.set_tab_disabled(3, true)
 	_phase_bar.current_tab = 0
+
+
+func _on_phase_tab(idx: int) -> void:
+	if idx == 1 and not _compile_ok:
+		_phase_bar.current_tab = 0
+		return
+	if idx >= 2:
+		_phase_bar.current_tab = 0 if not _compile_ok else mini(_phase_bar.current_tab, 1)
+		return
+	_apply_phase(idx)
+
+
+func _apply_phase(idx: int) -> void:
+	var props_phase: bool = idx == 1 and _compile_ok
+	_palette.visible = props_phase
+	_tools_title.visible = not props_phase
+	_tool_list.visible = not props_phase
+	_state_title.visible = not props_phase
+	_state_list.visible = not props_phase
+	_role_title.visible = not props_phase
+	_role_scroll.visible = not props_phase
+	_new_room_btn.visible = not props_phase
+	_lattice.set_slot_overlay_visible(props_phase)
+	if props_phase:
+		_lattice.set_tool(_LATTICE.TOOL_PROP)
+		var room: Dictionary = _lattice.get_selected()
+		_palette.set_role_filter(str(room.get("role", "")))
+		_status.text = "Props: LMB place/select · RMB delete · R rotate · Del remove · reserved (door/vertical) blocked"
+	elif _lattice.active_tool == _LATTICE.TOOL_PROP:
+		_lattice.set_tool(_LATTICE.TOOL_PAINT)
+		_status.text = "Paint LMB · RMB erase · Portal: click A then neighbor · Vertical: stacked N/N±1 · Del removes selected · Q/E deck"
 
 
 func _build_tools() -> void:
@@ -148,6 +197,7 @@ func _highlight_armed_tool() -> void:
 		_LATTICE.TOOL_PAINT: "Paint occupancy",
 		_LATTICE.TOOL_PORTAL: "Portal / exit",
 		_LATTICE.TOOL_VERTICAL: "Vertical opening",
+		_LATTICE.TOOL_PROP: "Place prop",
 	}
 	var want := str(labels.get(armed, "Paint occupancy"))
 	for child in _tool_list.get_children():
@@ -224,7 +274,9 @@ func _on_room_selected(room: Dictionary) -> void:
 	if room.is_empty():
 		_inspector.clear()
 		_room_list.deselect_all()
+		_palette.set_role_filter("")
 		return
+	_palette.set_role_filter(str(room.get("role", "")))
 	var id := int(room["id"])
 	_inspector.bind_room(room, _ensure_vars(id))
 	for i in _room_list.item_count:
@@ -258,6 +310,39 @@ func _on_vertical_selected(vertical: Dictionary) -> void:
 			break
 
 
+func _on_prop_selected(prop: Dictionary) -> void:
+	if prop.is_empty():
+		_inspector.clear()
+		return
+	_inspector.bind_prop(prop)
+	var cell: Variant = prop.get("cell", [])
+	if cell is Array and (cell as Array).size() >= 3:
+		var a: Array = cell
+		var room := _room_at(Vector3i(int(a[0]), int(a[1]), int(a[2])))
+		if not room.is_empty():
+			_palette.set_role_filter(str(room.get("role", "")))
+
+
+func _on_props_changed() -> void:
+	golden = _golden_from_lattice()
+	_refresh_prop_preview()
+
+
+func _room_at(cell: Vector3i) -> Dictionary:
+	for r in _lattice.get_rooms():
+		if int(r.get("deck", -1)) != cell.z:
+			continue
+		for c in r.get("cells", []):
+			var p: Vector2i = c
+			if p.x == cell.x and p.y == cell.y:
+				return r
+	return {}
+
+
+func _refresh_prop_preview() -> void:
+	_preview.apply_props(_lattice.get_props(), _palettes)
+
+
 func _on_portal_edited(portal: Dictionary) -> void:
 	_lattice.apply_portal_edit(portal)
 	_highlight_armed_state()
@@ -267,6 +352,7 @@ func _on_room_edited(room: Dictionary, vars: Dictionary) -> void:
 	var id := int(room.get("id", 0))
 	_room_vars[str(id)] = vars
 	_lattice.apply_room_edit(room)
+	_palette.set_role_filter(str(room.get("role", "")))
 	if _entry_room.is_empty():
 		_entry_room = str(room.get("stable_id", ""))
 	_schedule_compile()
@@ -307,6 +393,7 @@ func _resolve_content() -> void:
 		_banner_label.text = "DerelictAuthor missing. Run scripts/build_windows.ps1 -Builder."
 		_root_label.text = "content root: (extension missing)"
 		_preview.configure("", true)
+		_bind_palettes()
 		return
 	var info: Dictionary = _content.resolve()
 	_content_offline = bool(info.get("offline", true))
@@ -316,6 +403,7 @@ func _resolve_content() -> void:
 		_root_label.text = "content root: (offline)"
 		author.set_content_root("")
 		_preview.configure("", true)
+		_bind_palettes()
 		return
 	var path := str(info.get("path", ""))
 	_root_label.text = "content root: %s (%s)" % [path, info.get("source", "")]
@@ -328,6 +416,16 @@ func _resolve_content() -> void:
 		if not errs.is_empty():
 			msg += ": " + str(errs[0])
 		_banner_label.text = msg
+	_bind_palettes()
+
+
+func _bind_palettes() -> void:
+	if author == null:
+		_palettes = {}
+		_palette.bind_palettes({})
+		return
+	_palettes = author.palettes()
+	_palette.bind_palettes(_palettes)
 
 
 func _schedule_compile() -> void:
@@ -339,19 +437,30 @@ func _run_compile() -> void:
 	if author == null:
 		_show_issues([{"code": "Extension", "detail": "DerelictAuthor missing. Run scripts/build_windows.ps1 -Builder."}])
 		_preview.apply_plan({})
+		_preview.apply_props([], _palettes)
+		_lattice.set_compile_result({}, {}, false)
 		_lattice.set_occupancy_floors_visible(true)
+		_set_phase2_ready(false)
 		return
 	var result: Dictionary = author.compile(golden)
 	if result.has("error"):
 		_show_issues([{"code": "Compile", "detail": str(result["error"])}])
 		_preview.apply_plan({})
+		_preview.apply_props([], _palettes)
+		_lattice.set_compile_result({}, {}, false)
 		_lattice.set_occupancy_floors_visible(true)
+		_set_phase2_ready(false)
 		return
 	var issues: Array = result.get("issues", [])
 	_show_issues(issues)
 	var plan: Dictionary = result.get("plan", {})
+	var zones: Dictionary = result.get("zones", {})
+	var occupancy_ok: bool = not _lattice.get_rooms().is_empty()
+	var ok: bool = issues.is_empty() and occupancy_ok
+	_lattice.set_compile_result(zones, plan, ok)
 	_preview.set_active_deck(_lattice.active_deck)
 	_preview.apply_plan(plan)
+	_preview.apply_props(_lattice.get_props(), _palettes)
 	# Hide occupancy CSG floors only when every occupied cell has a floor GLB.
 	_lattice.set_occupancy_floors_visible(not _preview.covers_occupied_floors())
 	if issues.is_empty() and _issues.item_count > 0:
@@ -359,6 +468,17 @@ func _run_compile() -> void:
 	else:
 		_issues.add_item(_preview.status_text())
 	_apply_preview_banner()
+	_set_phase2_ready(ok)
+
+
+func _set_phase2_ready(ok: bool) -> void:
+	_compile_ok = ok
+	_phase_bar.set_tab_disabled(1, not ok)
+	if not ok and _phase_bar.current_tab == 1:
+		_phase_bar.current_tab = 0
+		_apply_phase(0)
+	elif ok and _phase_bar.current_tab == 1:
+		_lattice.set_slot_overlay_visible(true)
 
 
 func _show_issues(issues: Array) -> void:
@@ -482,4 +602,10 @@ func _golden_from_lattice() -> Dictionary:
 		"verticals": _lattice.get_verticals(),
 	}
 	g["room_vars"] = _room_vars.duplicate(true)
+	var props: Array = []
+	for p in _lattice.get_props():
+		if str(p.get("kind", "")) == "Door":
+			continue
+		props.append(p)
+	g["props"] = props
 	return g
