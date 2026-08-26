@@ -11,7 +11,7 @@
 //! ```
 
 use derelict_core::{GenData, GenParams};
-use derelict_godot::export::{ship_to_gameplay_slice_json, ship_to_layout_json};
+use derelict_core::structural::export::{to_layout_json, to_gameplay_slice_json, ExportOptions};
 use std::fmt::Write as _;
 
 const KIT_ID: &str = "ship_structural_v0";
@@ -41,8 +41,9 @@ fn compute() -> String {
         params.intactness_override = *intact;
         let ship = derelict_core::generate_ship(*seed, &params, &data).unwrap();
 
-        let layout_json = ship_to_layout_json(&ship, KIT_ID);
-        let gameplay_json = ship_to_gameplay_slice_json(&ship);
+        let opts = ExportOptions { kit_id: KIT_ID.to_string(), ..Default::default() };
+        let layout_json = serde_json::to_string(&to_layout_json(&ship, &opts)).unwrap();
+        let gameplay_json = serde_json::to_string(&to_gameplay_slice_json(&ship)).unwrap();
 
         let layout_hash = blake3::hash(layout_json.as_bytes());
         let gameplay_hash = blake3::hash(gameplay_json.as_bytes());
@@ -87,8 +88,8 @@ fn export_layout_has_required_keys() {
     let mut params = GenParams::new("shuttle");
     params.intactness_override = Some(9500);
     let ship = derelict_core::generate_ship(42, &params, &data).unwrap();
-    let json = ship_to_layout_json(&ship, KIT_ID);
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let json = to_layout_json(&ship, &ExportOptions { kit_id: KIT_ID.to_string(), ..Default::default() });
+    let value: serde_json::Value = json;
     let obj = value.as_object().expect("layout must be a JSON object");
 
     assert!(obj.contains_key("schema_version"), "missing schema_version");
@@ -131,8 +132,8 @@ fn export_gameplay_has_required_keys() {
     let mut params = GenParams::new("corvette");
     params.intactness_override = Some(6000);
     let ship = derelict_core::generate_ship(42, &params, &data).unwrap();
-    let json = ship_to_gameplay_slice_json(&ship);
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let json = to_gameplay_slice_json(&ship);
+    let value: serde_json::Value = json;
     let obj = value.as_object().expect("gameplay must be a JSON object");
 
     assert!(obj.contains_key("start_room"), "missing start_room");
@@ -158,8 +159,8 @@ fn export_room_ids_are_strings() {
     let mut params = GenParams::new("freighter");
     params.intactness_override = Some(9500);
     let ship = derelict_core::generate_ship(42, &params, &data).unwrap();
-    let json = ship_to_layout_json(&ship, KIT_ID);
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let json = to_layout_json(&ship, &ExportOptions { kit_id: KIT_ID.to_string(), ..Default::default() });
+    let value: serde_json::Value = json;
     let rooms = value["rooms"].as_array().unwrap();
 
     for room in rooms {
@@ -180,8 +181,8 @@ fn export_edge_keys_are_normalized() {
     let mut params = GenParams::new("shuttle");
     params.intactness_override = Some(9500);
     let ship = derelict_core::generate_ship(42, &params, &data).unwrap();
-    let json = ship_to_layout_json(&ship, KIT_ID);
-    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let json = to_layout_json(&ship, &ExportOptions { kit_id: KIT_ID.to_string(), ..Default::default() });
+    let value: serde_json::Value = json;
     let edges = value["structural_plan"]["edges"]
         .as_object()
         .expect("edges must be object");

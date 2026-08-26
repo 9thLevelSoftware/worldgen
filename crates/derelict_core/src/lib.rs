@@ -17,8 +17,7 @@ pub mod topology;
 pub use archetype::GenData;
 pub use model::{
     apply_diff, CauseOfLoss, Deck, DeckLayer, EntityKind, EntitySpec, FloorTile, GenParams,
-    GridPos, ItemStack, RoomGraph, RoomNode, RoomType, Ship, ShipMutationDiff, WallEdge,
-    GENERATOR_VERSION,
+    GridPos, ItemStack, RoomGraph, RoomNode, Ship, ShipMutationDiff, WallEdge,
 };
 
 /// Public worldgen contract version consumed by engine integrations.

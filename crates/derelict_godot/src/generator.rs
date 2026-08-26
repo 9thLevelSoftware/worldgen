@@ -2,7 +2,6 @@
 
 use crate::async_gen::{AsyncGen, GenResult};
 use crate::convert::{gen_params_from_dict, ship_to_dictionary};
-use crate::export::{ship_to_gameplay_slice_json, ship_to_layout_json};
 use derelict_core::GenData;
 use godot::builtin::{GString, VarDictionary, Variant};
 use godot::classes::RefCounted;
@@ -48,41 +47,6 @@ impl DerelictGenerator {
         }
     }
 
-    /// Export the structural layout document consumed by the Synaptic Sea
-    /// `GeneratedShipLoader`.
-    #[func]
-    fn export_layout_json(&mut self, seed: i64, params: VarDictionary, kit_id: GString) -> GString {
-        let p = gen_params_from_dict(&params);
-        let data = self.data().clone();
-        match derelict_core::generate_ship(seed as u64, &p, &data) {
-            Ok(ship) => {
-                let text = ship_to_layout_json(&ship, kit_id.to_string().as_str());
-                GString::from(&text)
-            }
-            Err(e) => {
-                let text = serde_json::json!({"error": e.to_string()}).to_string();
-                GString::from(&text)
-            }
-        }
-    }
-
-    /// Export the gameplay slice document consumed by the Synaptic Sea
-    /// `GeneratedShipLoader`.
-    #[func]
-    fn export_gameplay_slice_json(&mut self, seed: i64, params: VarDictionary) -> GString {
-        let p = gen_params_from_dict(&params);
-        let data = self.data().clone();
-        match derelict_core::generate_ship(seed as u64, &p, &data) {
-            Ok(ship) => {
-                let text = ship_to_gameplay_slice_json(&ship);
-                GString::from(&text)
-            }
-            Err(e) => {
-                let text = serde_json::json!({"error": e.to_string()}).to_string();
-                GString::from(&text)
-            }
-        }
-    }
 
     /// Start background generation; returns a request id for poll_async.
     #[func]

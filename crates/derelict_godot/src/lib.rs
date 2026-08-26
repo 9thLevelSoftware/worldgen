@@ -8,7 +8,7 @@ use godot::prelude::*;
 
 mod async_gen;
 mod convert;
-pub mod export;
+
 mod generator;
 
 struct DerelictExtension;
