@@ -481,8 +481,11 @@ func remove_selected_portal() -> void:
 	_portals.remove_at(_selected_portal)
 	_selected_portal = -1
 	_selected_kind = "room"
+	var hz_pruned := _prune_hazards()
 	_sync_links()
 	occupancy_changed.emit()
+	if hz_pruned:
+		hazards_changed.emit()
 	_emit_selection()
 
 
@@ -2280,8 +2283,11 @@ func _hazard_valid(h: Dictionary) -> bool:
 		return str(h.get("to_room", "")) == str(h.get("from_room", ""))
 	if _occupancy.has(_key(b)):
 		return str(h.get("to_room", "")) == _stable_of(int(_occupancy[_key(b)]))
-	# Void to_cell is legal for portal-aligned exterior overlays.
-	return true
+	# Void to_cell is legal only while the matching exterior portal exists.
+	var portal_idx := _find_portal(a, b)
+	if portal_idx < 0:
+		return false
+	return bool(_portals[portal_idx].get("exterior", false))
 
 
 func _prune_hazards() -> bool:
