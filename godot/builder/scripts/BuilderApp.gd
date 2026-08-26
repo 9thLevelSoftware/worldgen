@@ -11,6 +11,7 @@ var golden: Dictionary = {}
 var _room_vars: Dictionary = {}
 var _palettes: Dictionary = {}
 var _module_overrides: Dictionary = {"floors": {}, "ceilings": {}, "edges": {}}
+var _edge_override_kinds: Dictionary = {}
 var _dressed: Dictionary = {"floors": {}, "ceilings": {}, "edges": {}}
 var _last_plan: Dictionary = {}
 var _module_sel: Dictionary = {}
@@ -471,6 +472,7 @@ func _enrich_module_sel(sel: Dictionary) -> Dictionary:
 		}
 		if _lattice.has_vertical_at_key(key):
 			next["note"] = "Ceiling is suppressed on this vertical opening."
+			next["assignable"] = false
 	var preferred := PackedStringArray()
 	if author != null:
 		preferred = author.legal_modules(str(next.get("kind", "")), str(next.get("state", "")))
@@ -537,9 +539,14 @@ func _on_module_override_set(ov_map: String, key: String, module_id: String) -> 
 		return
 	if key.is_empty() or module_id.is_empty():
 		return
+	if ov_map == "ceilings" and _lattice.has_vertical_at_key(key):
+		return
 	if not _module_overrides.has(ov_map) or not (_module_overrides[ov_map] is Dictionary):
 		_module_overrides[ov_map] = {}
 	(_module_overrides[ov_map] as Dictionary)[key] = module_id
+	if ov_map == "edges":
+		var edge := _plan_edge(key)
+		_edge_override_kinds[key] = str(edge.get("kind", edge.get("state", "")))
 	if not _module_sel.is_empty():
 		_module_sel["module_id"] = module_id
 		_module_sel["overridden"] = true
@@ -692,6 +699,10 @@ func _run_compile() -> void:
 	var ok: bool = issues.is_empty() and occupancy_ok
 	_lattice.set_compile_result(zones, plan, ok)
 	_last_plan = plan
+	if _prune_stale_module_overrides():
+		golden = _golden_from_lattice()
+		_schedule_compile()
+		return
 	_capture_dressed(plan)
 	_preview.set_active_deck(_lattice.active_deck)
 	_preview.apply_plan(plan)
@@ -862,6 +873,30 @@ func _golden_from_lattice() -> Dictionary:
 		"edges": (_module_overrides.get("edges", {}) as Dictionary).duplicate(true),
 	}
 	return g
+
+
+func _prune_stale_module_overrides() -> bool:
+	var dirty := false
+	var ceil: Dictionary = _module_overrides.get("ceilings", {})
+	for key in ceil.keys():
+		if _lattice.has_vertical_at_key(str(key)):
+			ceil.erase(key)
+			dirty = true
+	var ov: Dictionary = _module_overrides.get("edges", {})
+	for key in ov.keys():
+		var rec := _plan_edge(str(key))
+		if rec.is_empty():
+			ov.erase(key)
+			_edge_override_kinds.erase(key)
+			dirty = true
+			continue
+		var kind := str(rec.get("kind", rec.get("state", "")))
+		var remembered := str(_edge_override_kinds.get(key, ""))
+		if remembered != "" and remembered != kind:
+			ov.erase(key)
+			_edge_override_kinds.erase(key)
+			dirty = true
+	return dirty
 
 
 func _capture_dressed(plan: Dictionary) -> void:

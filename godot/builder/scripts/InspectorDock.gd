@@ -406,6 +406,11 @@ func bind_module(sel: Dictionary, legal: PackedStringArray) -> void:
 	_mod_note.text = module_note(sel)
 	_mod_note.visible = not _mod_note.text.is_empty()
 	_fill_module_list(kind, current)
+	var assignable := bool(sel.get("assignable", true))
+	_mod_list.mouse_filter = Control.MOUSE_FILTER_IGNORE if not assignable else Control.MOUSE_FILTER_STOP
+	if not assignable:
+		_mod_note.text = module_note(sel)
+		_mod_note.visible = true
 	_mod_grey_note.visible = kind == "floor"
 	if _mod_grey_note.visible:
 		_mod_grey_note.text = "Greyed ids are not in FLOOR_MODULES. Assigning writes the override so the GLB preview updates; validate returns FloorBadModule and export is refused."
@@ -509,6 +514,8 @@ func _on_module_item_selected(index: int) -> void:
 	var ov_map := str(_mod_sel.get("ov_map", ""))
 	var key := str(_mod_sel.get("key", ""))
 	if ov_map.is_empty() or key.is_empty():
+		return
+	if not bool(_mod_sel.get("assignable", true)):
 		return
 	_mod_sel["module_id"] = id
 	_mod_sel["overridden"] = true
