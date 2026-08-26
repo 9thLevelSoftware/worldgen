@@ -27,8 +27,8 @@ pub use model::{
 /// new engine-facing entry points use this exported contract version.
 pub const GENERATOR_VERSION: u32 = 2;
 pub use authoring::{
-    apply_module_overrides, compile_authored, AuthoredHazards, AuthoredProp, GoldenArea, LinkZone,
-    ModuleOverrides, RoomVars, TopologyDto,
+    apply_module_overrides, compile_authored, AuthorPalettes, AuthoredHazards, AuthoredProp,
+    BuilderKitCatalog, GoldenArea, LinkZone, ModuleOverrides, RoomVars, TopologyDto,
 };
 pub use pipeline::{generate_ship, generate_ship_timed, GenError, GenReport};
 pub use role::Role;
