@@ -32,6 +32,30 @@ pub enum Role {
 }
 
 impl Role {
+    pub const ALL: [Role; 21] = [
+        Role::Airlock,
+        Role::Dock,
+        Role::Corridor,
+        Role::MainSpine,
+        Role::Hub,
+        Role::Ramp,
+        Role::Elevator,
+        Role::Bridge,
+        Role::Engineering,
+        Role::Reactor,
+        Role::LifeSupport,
+        Role::Maintenance,
+        Role::Cargo,
+        Role::Hangar,
+        Role::Storage,
+        Role::Armory,
+        Role::Security,
+        Role::Medical,
+        Role::CrewQuarters,
+        Role::MessHall,
+        Role::Compartment,
+    ];
+
     /// Connective roles are exempt from adjacency-compatibility rules and
     /// get corridor-style flooring.
     pub fn is_connective(self) -> bool {

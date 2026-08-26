@@ -23,6 +23,8 @@ pub struct ValidationPolicy {
     pub critical_path: Vec<RoomId>,
     /// Story-sanctioned severing of the critical path across fragments.
     pub allows_fragment_split: bool,
+    /// When set, floor placements may use these module ids instead of `FLOOR_MODULES`.
+    pub allowed_floor_modules: Option<Vec<String>>,
 }
 
 impl ValidationPolicy {
@@ -32,6 +34,7 @@ impl ValidationPolicy {
             fragment_of: None,
             critical_path,
             allows_fragment_split: false,
+            allowed_floor_modules: None,
         }
     }
     pub fn post_damage(
@@ -44,6 +47,14 @@ impl ValidationPolicy {
             fragment_of,
             critical_path,
             allows_fragment_split,
+            allowed_floor_modules: None,
+        }
+    }
+
+    fn is_floor_module(&self, module_id: &str) -> bool {
+        match &self.allowed_floor_modules {
+            Some(list) => list.iter().any(|m| m == module_id),
+            None => FLOOR_MODULES.contains(&module_id),
         }
     }
 }
@@ -207,7 +218,7 @@ pub fn validate(
                 &mut issues,
             );
         }
-        if !FLOOR_MODULES.contains(&f.module_id.as_str()) {
+        if !policy.is_floor_module(&f.module_id) {
             push(
                 IssueCode::FloorBadModule,
                 format!("floor {} module '{}'", f.cell_key, f.module_id),
@@ -364,7 +375,7 @@ pub fn validate(
                 &mut issues,
             );
         }
-        if FLOOR_MODULES.contains(&p.module_id.as_str()) {
+        if policy.is_floor_module(&p.module_id) {
             push(
                 IssueCode::EdgeModuleMismatch,
                 format!("floor module on edge {}", p.edge_key),

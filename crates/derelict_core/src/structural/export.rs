@@ -7,7 +7,9 @@
 use crate::model::{EntityKind, Ship};
 use crate::role::Role;
 use crate::stages::furnish::interior_zones;
-use crate::structural::plan::{edge_key, Cell, DamageVariant, Dir, EdgeRecord, RoomId, NO_ROOM};
+use crate::structural::plan::{
+    edge_key, Cell, DamageVariant, Dir, EdgeRecord, FloorPlacement, RoomId, StructuralPlan, NO_ROOM,
+};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
@@ -34,6 +36,109 @@ fn variant_name(v: DamageVariant) -> &'static str {
         DamageVariant::Damaged => "damaged",
         DamageVariant::Breached => "breached",
     }
+}
+
+/// `structural_plan` object shared by layout export and the authoring preview.
+pub fn structural_plan_to_json(
+    plan: &StructuralPlan,
+    name_of: &impl Fn(RoomId) -> String,
+) -> Value {
+    let edge_json = |e: &EdgeRecord, with_placement_id: bool| -> Value {
+        let mut m = Map::new();
+        m.insert("id".into(), json!(format!("edge:{}", e.edge_key)));
+        m.insert("key".into(), json!(e.edge_key));
+        m.insert("edge_key".into(), json!(e.edge_key));
+        m.insert("deck".into(), json!(e.cell.deck));
+        m.insert("cell".into(), cell2(e.cell));
+        m.insert("direction".into(), json!(e.direction.name()));
+        m.insert(
+            "opposite_direction".into(),
+            json!(e.direction.opposite().name()),
+        );
+        m.insert(
+            "source_cells".into(),
+            json!([cell3(e.source_cells[0]), cell3(e.source_cells[1])]),
+        );
+        m.insert(
+            "room_ids".into(),
+            json!([name_of(e.room_ids.0), name_of(e.room_ids.1)]),
+        );
+        m.insert("owner_room".into(), json!(name_of(e.room_ids.0)));
+        m.insert("other_room".into(), json!(name_of(e.room_ids.1)));
+        m.insert("kind".into(), json!(e.kind.name()));
+        m.insert("state".into(), json!(e.kind.name()));
+        m.insert("module_id".into(), json!(e.module_id));
+        m.insert("variant".into(), json!(variant_name(e.variant)));
+        m.insert("position".into(), pos(e.position));
+        m.insert("yaw_degrees".into(), json!(e.yaw_degrees as f32));
+        m.insert("portal".into(), json!(e.portal));
+        m.insert("exterior".into(), json!(e.exterior));
+        m.insert("placement_required".into(), json!(e.wrapper_required));
+        m.insert("wrapper_required".into(), json!(e.wrapper_required));
+        if with_placement_id {
+            m.insert("placement_id".into(), json!(format!("edge:{}", e.edge_key)));
+        }
+        m.insert("socket_bindings".into(), json!([]));
+        Value::Object(m)
+    };
+
+    let occupancy: Map<String, Value> = plan
+        .occupancy
+        .iter()
+        .map(|(k, rec)| {
+            (
+                k.clone(),
+                json!({
+                    "cell_key": k,
+                    "deck": rec.cell.deck,
+                    "cell": cell2(rec.cell),
+                    "room_id": name_of(rec.room_id),
+                    "room_ids": [name_of(rec.room_id)],
+                    "position": pos(rec.cell.world_pos()),
+                    "module_id": rec.module_id,
+                    "variant": variant_name(rec.variant),
+                    "decal": rec.decal,
+                }),
+            )
+        })
+        .collect();
+    let edges: Map<String, Value> = plan
+        .edges
+        .iter()
+        .map(|(k, e)| (k.clone(), edge_json(e, false)))
+        .collect();
+    let placements: Vec<Value> = plan.placements.iter().map(|e| edge_json(e, true)).collect();
+    let flat_placement = |f: &FloorPlacement| {
+        json!({
+            "id": f.id,
+            "placement_id": f.id,
+            "module_id": f.module_id,
+            "position": pos(f.position),
+            "yaw_degrees": f.yaw_degrees as f32,
+            "deck": f.cell.deck,
+            "cell": cell2(f.cell),
+            "cell_key": f.cell_key,
+            "room_id": name_of(f.room_id),
+            "room_ids": [name_of(f.room_id)],
+            "variant": variant_name(f.variant),
+            "socket_bindings": [],
+        })
+    };
+    json!({
+        "occupancy": occupancy,
+        "edges": edges,
+        "placements": placements,
+        "floor_placements": plan.floor_placements.iter().map(flat_placement).collect::<Vec<_>>(),
+        "ceiling_placements": plan.ceiling_placements.iter().map(flat_placement).collect::<Vec<_>>(),
+        "socket_bindings": plan.socket_bindings.iter().map(|b| json!({
+            "placement_id": b.placement_id,
+            "socket_id": b.socket_id,
+            "neighbor_placement_id": b.neighbor_placement_id,
+            "neighbor_socket_id": b.neighbor_socket_id,
+            "kind": b.kind,
+        })).collect::<Vec<_>>(),
+        "errors": plan.errors,
+    })
 }
 
 pub struct ExportOptions {
@@ -176,121 +281,7 @@ pub fn to_layout_json(ship: &Ship, opts: &ExportOptions) -> Value {
         .map(|id| json!(name_of(*id)))
         .collect();
 
-    // --- structural plan -----------------------------------------------------
-    let edge_json = |e: &EdgeRecord, with_placement_id: bool| -> Value {
-        let mut m = Map::new();
-        m.insert("id".into(), json!(format!("edge:{}", e.edge_key)));
-        m.insert("key".into(), json!(e.edge_key));
-        m.insert("edge_key".into(), json!(e.edge_key));
-        m.insert("deck".into(), json!(e.cell.deck));
-        m.insert("cell".into(), cell2(e.cell));
-        m.insert("direction".into(), json!(e.direction.name()));
-        m.insert(
-            "opposite_direction".into(),
-            json!(e.direction.opposite().name()),
-        );
-        m.insert(
-            "source_cells".into(),
-            json!([cell3(e.source_cells[0]), cell3(e.source_cells[1])]),
-        );
-        m.insert(
-            "room_ids".into(),
-            json!([name_of(e.room_ids.0), name_of(e.room_ids.1)]),
-        );
-        m.insert("owner_room".into(), json!(name_of(e.room_ids.0)));
-        m.insert("other_room".into(), json!(name_of(e.room_ids.1)));
-        m.insert("kind".into(), json!(e.kind.name()));
-        m.insert("state".into(), json!(e.kind.name()));
-        m.insert("module_id".into(), json!(e.module_id));
-        m.insert("variant".into(), json!(variant_name(e.variant)));
-        m.insert("position".into(), pos(e.position));
-        m.insert("yaw_degrees".into(), json!(e.yaw_degrees as f32));
-        m.insert("portal".into(), json!(e.portal));
-        m.insert("exterior".into(), json!(e.exterior));
-        m.insert("placement_required".into(), json!(e.wrapper_required));
-        m.insert("wrapper_required".into(), json!(e.wrapper_required));
-        if with_placement_id {
-            m.insert("placement_id".into(), json!(format!("edge:{}", e.edge_key)));
-        }
-        m.insert("socket_bindings".into(), json!([]));
-        Value::Object(m)
-    };
-
-    let occupancy: Map<String, Value> = ship
-        .plan
-        .occupancy
-        .iter()
-        .map(|(k, rec)| {
-            (
-                k.clone(),
-                json!({
-                    "cell_key": k,
-                    "deck": rec.cell.deck,
-                    "cell": cell2(rec.cell),
-                    "room_id": name_of(rec.room_id),
-                    "room_ids": [name_of(rec.room_id)],
-                    "position": pos(rec.cell.world_pos()),
-                    "module_id": rec.module_id,
-                    "variant": variant_name(rec.variant),
-                    "decal": rec.decal,
-                }),
-            )
-        })
-        .collect();
-    let edges: Map<String, Value> = ship
-        .plan
-        .edges
-        .iter()
-        .map(|(k, e)| (k.clone(), edge_json(e, false)))
-        .collect();
-    let placements: Vec<Value> = ship
-        .plan
-        .placements
-        .iter()
-        .map(|e| edge_json(e, true))
-        .collect();
-    let flat_placement = |f: &crate::structural::plan::FloorPlacement| {
-        json!({
-            "id": f.id,
-            "placement_id": f.id,
-            "module_id": f.module_id,
-            "position": pos(f.position),
-            "yaw_degrees": f.yaw_degrees as f32,
-            "deck": f.cell.deck,
-            "cell": cell2(f.cell),
-            "cell_key": f.cell_key,
-            "room_id": name_of(f.room_id),
-            "room_ids": [name_of(f.room_id)],
-            "variant": variant_name(f.variant),
-            "socket_bindings": [],
-        })
-    };
-    let floor_placements: Vec<Value> = ship
-        .plan
-        .floor_placements
-        .iter()
-        .map(flat_placement)
-        .collect();
-    let ceiling_placements: Vec<Value> = ship
-        .plan
-        .ceiling_placements
-        .iter()
-        .map(flat_placement)
-        .collect();
-    let socket_bindings: Vec<Value> = ship
-        .plan
-        .socket_bindings
-        .iter()
-        .map(|b| {
-            json!({
-                "placement_id": b.placement_id,
-                "socket_id": b.socket_id,
-                "neighbor_placement_id": b.neighbor_placement_id,
-                "neighbor_socket_id": b.neighbor_socket_id,
-                "kind": b.kind,
-            })
-        })
-        .collect();
+    let structural_plan = structural_plan_to_json(&ship.plan, &name_of);
 
     json!({
         "schema_version": "1.2.0",
@@ -326,15 +317,7 @@ pub fn to_layout_json(ship: &Ship, opts: &ExportOptions) -> Value {
         "fire_zones": [],
         "arc_zones": [],
         "breach_zones": [],
-        "structural_plan": {
-            "occupancy": occupancy,
-            "edges": edges,
-            "placements": placements,
-            "floor_placements": floor_placements,
-            "ceiling_placements": ceiling_placements,
-            "socket_bindings": socket_bindings,
-            "errors": [],
-        },
+        "structural_plan": structural_plan,
     })
 }
 
