@@ -119,6 +119,16 @@ func is_painting() -> bool:
 	return _lmb or _rmb
 
 
+func cancel_pointer() -> void:
+	_lmb = false
+	_rmb = false
+	_panning = false
+	_orbiting = false
+	_paint_drag = false
+	_has_last_screen = false
+	hide_ghost()
+
+
 ## Arm a new room; the RoomSpec is created on the next successful void paint.
 func create_room() -> void:
 	_selected_id = 0
@@ -426,12 +436,22 @@ func _erase_cell(cell: Vector3i) -> void:
 			if p.x == cell.x and p.y == cell.y:
 				continue
 			cells.append(p)
-		r["cells"] = cells
 		if cells.is_empty():
 			if _selected_id == id:
 				_selected_id = 0
 			continue
+		var components := _connected_components(cells)
+		r["cells"] = components[0]
 		leftover.append(r)
+		var deck := int(r["deck"])
+		var role := str(r["role"])
+		for i in range(1, components.size()):
+			var split := _make_room(role, deck)
+			split["cells"] = components[i]
+			for p in components[i]:
+				var xy: Vector2i = p
+				_occupancy[_key(Vector3i(xy.x, xy.y, deck))] = int(split["id"])
+			leftover.append(split)
 	_rooms = leftover
 	_sync_floors()
 	occupancy_changed.emit()
@@ -490,6 +510,29 @@ func _refresh_ghost() -> void:
 	else:
 		if _ghost:
 			_ghost.visible = false
+
+
+func _connected_components(cells: Array) -> Array:
+	var remaining: Dictionary = {}
+	for c in cells:
+		var p: Vector2i = c
+		remaining[p] = true
+	var out: Array = []
+	while not remaining.is_empty():
+		var start: Vector2i = remaining.keys()[0]
+		var queue: Array[Vector2i] = [start]
+		remaining.erase(start)
+		var comp: Array = [start]
+		while not queue.is_empty():
+			var cur: Vector2i = queue.pop_front()
+			for d in CARDINALS:
+				var n: Vector2i = cur + d
+				if remaining.has(n):
+					remaining.erase(n)
+					queue.append(n)
+					comp.append(n)
+		out.append(comp)
+	return out
 
 
 func _key(cell: Vector3i) -> String:

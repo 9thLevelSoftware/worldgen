@@ -67,7 +67,7 @@ func _wire() -> void:
 	_iso_btn.pressed.connect(_toggle_iso)
 	%NewRoomBtn.pressed.connect(func() -> void: _lattice.create_room())
 	_view.gui_input.connect(_on_view_gui_input)
-	_view.mouse_exited.connect(func() -> void: _lattice.hide_ghost())
+	_view.mouse_exited.connect(_on_view_pointer_cancelled)
 	_lattice.occupancy_changed.connect(_on_occupancy_changed)
 	_lattice.room_selected.connect(_on_room_selected)
 	_lattice.deck_changed.connect(func(_d: int) -> void: _sync_deck_label())
@@ -119,6 +119,16 @@ func _highlight_armed_role() -> void:
 func _toggle_iso() -> void:
 	_lattice.set_iso(not _lattice.is_iso())
 	_iso_btn.text = "Cam: Iso" if _lattice.is_iso() else "Cam: Orbit"
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_WINDOW_FOCUS_OUT or what == NOTIFICATION_APPLICATION_FOCUS_OUT:
+		_on_view_pointer_cancelled()
+
+
+func _on_view_pointer_cancelled() -> void:
+	if _lattice:
+		_lattice.cancel_pointer()
 
 
 func _on_view_gui_input(event: InputEvent) -> void:

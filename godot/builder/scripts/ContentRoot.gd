@@ -61,7 +61,7 @@ func _persist(path: String) -> void:
 
 
 func _sibling_candidates() -> Array[String]:
-	var out: Array[String] = [DEFAULT_WIN, "D:\\the-synaptic-sea"]
+	var out: Array[String] = [DEFAULT_WIN]
 	var dir := ProjectSettings.globalize_path("res://").simplify_path()
 	var hops := 0
 	while hops < 6:
