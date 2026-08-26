@@ -16,6 +16,8 @@ func _run_checks() -> void:
 	_check_two_cell_zone()
 	_check_pending_not_a_record()
 	_check_reclick_inspects()
+	_check_void_neighbor()
+	_check_stamp_role_compartment()
 	_check_portal_edge()
 	_check_unmapped_role()
 	_check_inspector_honesty()
@@ -149,13 +151,80 @@ func _check_reclick_inspects() -> void:
 		_fail("re-click restamped id")
 	if str(sel.get("kind", "")) != "electrical_arc":
 		_fail("re-click restamped kind")
+	# LMB same-kind re-click inspects (the authoring gesture, not only try_place_hazard).
+	var east_hit := Vector3(0.0 * 4.0 + 1.9, 0.0, 0.0)
+	lattice.try_hazard_click(Vector3i(0, 0, 0), east_hit)
+	if lattice.get_hazards().size() != 1:
+		_fail("LMB same-kind re-click created a second zone")
+	if str(lattice.get_selected_hazard().get("id", "")) != first_id:
+		_fail("LMB re-click restamped id")
 	# A different kind on the same link is a second overlay, not a restamp.
 	lattice.stamp_hazard_kind("radiation")
-	if not lattice.try_place_hazard(Vector3i(0, 0, 0), Vector3i(1, 0, 0)):
-		_fail("radiation on same link")
+	if not lattice.try_hazard_click(Vector3i(0, 0, 0), east_hit):
+		_fail("LMB different kind should add a second overlay")
 	if lattice.get_hazards().size() != 2:
-		_fail("expected fire+radiation overlays on one link, got %d" % lattice.get_hazards().size())
+		_fail("expected arc+radiation overlays on one link, got %d" % lattice.get_hazards().size())
 	print("RECLICK_OK inspect no restamp")
+	lattice.free()
+
+
+func _check_void_neighbor() -> void:
+	var Lattice := load("res://scripts/OccupancyLattice.gd")
+	var lattice = Lattice.new()
+	root.add_child(lattice)
+	lattice.active_role = "cargo"
+	if not lattice.paint_cell(Vector3i(0, 0, 0)):
+		_fail("paint void-neighbor origin")
+	lattice.set_tool(Lattice.TOOL_HAZARD)
+	lattice.stamp_hazard_kind("timed_fire")
+	if not lattice.try_place_hazard(Vector3i(0, 0, 0), Vector3i(1, 0, 0)):
+		_fail("void-neighbor fire")
+	var zones: Array = lattice.get_hazards()
+	if zones.size() != 1:
+		_fail("void-neighbor expected 1 zone, got %d" % zones.size())
+	else:
+		var z: Dictionary = zones[0]
+		var from_c: Array = z.get("from_cell", [])
+		var to_c: Array = z.get("to_cell", [])
+		if from_c != to_c:
+			_fail("void neighbor should duplicate from_cell, got %s → %s" % [from_c, to_c])
+	var first_id := str(lattice.get_selected_hazard().get("id", ""))
+	if not lattice.try_place_hazard(Vector3i(0, 0, 0), Vector3i(1, 0, 0)):
+		_fail("void-neighbor re-click should inspect")
+	if lattice.get_hazards().size() != 1:
+		_fail("void-neighbor re-click restamped (%d)" % lattice.get_hazards().size())
+	if str(lattice.get_selected_hazard().get("id", "")) != first_id:
+		_fail("void-neighbor re-click changed id")
+	var east_hit := Vector3(0.0 * 4.0 + 1.9, 0.0, 0.0)
+	lattice.try_hazard_click(Vector3i(0, 0, 0), east_hit)
+	if lattice.get_hazards().size() != 1:
+		_fail("void-neighbor LMB re-click restamped")
+	print("VOID_NEIGHBOR_OK collapsed pair inspects")
+	lattice.free()
+
+
+func _check_stamp_role_compartment() -> void:
+	var Lattice := load("res://scripts/OccupancyLattice.gd")
+	var lattice = Lattice.new()
+	root.add_child(lattice)
+	lattice.active_role = "corridor"
+	if not lattice.paint_cell(Vector3i(0, 0, 0)):
+		_fail("paint corridor a")
+	if not lattice.paint_cell(Vector3i(1, 0, 0)):
+		_fail("paint corridor b")
+	lattice.set_tool(Lattice.TOOL_HAZARD)
+	lattice.stamp_hazard_kind("timed_fire")
+	if not lattice.try_place_hazard(Vector3i(0, 0, 0), Vector3i(1, 0, 0)):
+		_fail("fire on corridor")
+	if str(lattice.get_hazards()[0].get("compartment_id", "")) != "":
+		_fail("corridor fire should start with empty compartment_id")
+	lattice.stamp_role("engineering")
+	if str(lattice.get_hazards()[0].get("compartment_id", "")) != "engineering":
+		_fail("stamp_role engineering should refresh compartment_id, got %s" % lattice.get_hazards()[0].get("compartment_id", ""))
+	lattice.stamp_role("airlock")
+	if str(lattice.get_hazards()[0].get("compartment_id", "")) != "":
+		_fail("stamp_role airlock should clear stale engineering cid")
+	print("STAMP_ROLE_OK compartment_id refresh")
 	lattice.free()
 
 

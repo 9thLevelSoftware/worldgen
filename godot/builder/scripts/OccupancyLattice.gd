@@ -68,6 +68,7 @@ const HAZARD_COLORS := {
 }
 
 ## playable_generated_ship.gd COMPARTMENT_FOR_ROLE. Unmapped roles stay visual.
+## hydroponics/cockpit/engine_bay are loader aliases; the role palette cannot stamp hydroponics.
 const COMPARTMENT_FOR_ROLE := {
 	"bridge": "bridge",
 	"cockpit": "bridge",
@@ -241,27 +242,24 @@ func get_hazards() -> Array[Dictionary]:
 
 
 func get_hazards_dto() -> Dictionary:
-	var fire: Array = []
-	var breach: Array = []
-	var arc: Array = []
-	var rad: Array = []
+	var buckets := {
+		"fire_zones": [],
+		"breach_zones": [],
+		"arc_zones": [],
+		"radiation_zones": [],
+	}
 	for h in _hazards:
 		var rec := _hazard_dto(h)
-		match str(rec.get("kind", "")):
-			"timed_fire":
-				fire.append(rec)
-			"hull_breach":
-				breach.append(rec)
-			"electrical_arc":
-				arc.append(rec)
-			"radiation":
-				rad.append(rec)
+		var key := str(HAZARD_BUCKET.get(str(rec.get("kind", "")), ""))
+		if key.is_empty() or not buckets.has(key):
+			continue
+		(buckets[key] as Array).append(rec)
 	return {
 		"source": "authored",
-		"fire_zones": fire,
-		"breach_zones": breach,
-		"arc_zones": arc,
-		"radiation_zones": rad,
+		"fire_zones": buckets["fire_zones"],
+		"breach_zones": buckets["breach_zones"],
+		"arc_zones": buckets["arc_zones"],
+		"radiation_zones": buckets["radiation_zones"],
 	}
 
 
@@ -658,10 +656,13 @@ func stamp_role(role: String) -> void:
 		return
 	if changed:
 		room["role"] = role
+	var hz_changed := _refresh_hazard_rooms()
 	_sync_floors()
 	_sync_links()
 	if changed:
 		occupancy_changed.emit()
+	if hz_changed:
+		hazards_changed.emit()
 	room_selected.emit(room)
 
 
@@ -676,10 +677,12 @@ func apply_room_edit(edited: Dictionary) -> void:
 		var role := str(edited.get("role", ""))
 		if not role.is_empty():
 			r["role"] = role
-		_refresh_hazard_rooms()
+		var hz_changed := _refresh_hazard_rooms()
 		_sync_floors()
 		_sync_links()
 		occupancy_changed.emit()
+		if hz_changed:
+			hazards_changed.emit()
 		room_selected.emit(r)
 		return
 
@@ -1106,6 +1109,8 @@ func _stamp_room_id(id: int, role: String) -> bool:
 		if str(r["role"]) == role:
 			return false
 		r["role"] = role
+		if _refresh_hazard_rooms():
+			hazards_changed.emit()
 		return true
 	return false
 
@@ -2000,7 +2005,12 @@ func _try_lmb_hazard(cell: Vector3i) -> void:
 		return
 	var existing := _hazard_index_near(cell, _last_hit)
 	if existing >= 0:
-		_select_hazard(existing, false)
+		var hz: Dictionary = _hazards[existing]
+		if str(hz.get("kind", "")) == active_hazard_kind:
+			_select_hazard(existing, false)
+			return
+		# Different kind on this link: second overlay, same endpoints as portal path.
+		_commit_hazard(_xyz_cell(hz["from_cell"]), _xyz_cell(hz["to_cell"]))
 		return
 	if not _occupancy.has(_key(cell)):
 		hover_info.emit("blocked: hazard start must be occupied")
@@ -2012,40 +2022,46 @@ func _try_lmb_hazard(cell: Vector3i) -> void:
 
 
 func _commit_hazard(a: Vector3i, b: Vector3i) -> void:
-	var reason := _hazard_block_reason(a, b)
-	if reason != "":
-		hover_info.emit(reason)
-		return
 	var portal_idx := _find_portal(a, b)
 	if portal_idx >= 0:
 		_commit_hazard_from_portal(portal_idx)
 		return
-	var existing := _find_hazard(a, b, active_hazard_kind)
+	var stored_from := a
+	var stored_to := b
+	if a != b:
+		var reason := _hazard_block_reason(a, b)
+		if reason != "":
+			hover_info.emit(reason)
+			return
+		if not _occupancy.has(_key(b)):
+			# Same-room visual: duplicate from_cell so the loader does not resolve a void.
+			stored_to = a
+	else:
+		# Collapsed stored pair from a prior void-neighbor commit.
+		if not _occupancy.has(_key(a)):
+			hover_info.emit("blocked: hazard start must be occupied")
+			return
+	var existing := _find_hazard(stored_from, stored_to, active_hazard_kind)
 	if existing >= 0:
 		_select_hazard(existing, false)
 		return
-	if not _occupancy.has(_key(a)):
+	if not _occupancy.has(_key(stored_from)):
 		hover_info.emit("blocked: hazard start must be occupied")
 		return
-	var from_id := int(_occupancy[_key(a)])
+	var from_id := int(_occupancy[_key(stored_from)])
 	var from_stable := _stable_of(from_id)
 	var to_stable := from_stable
-	var to_cell := _cell_xyz(b)
-	if _occupancy.has(_key(b)):
-		to_stable = _stable_of(int(_occupancy[_key(b)]))
-	else:
-		# Same-room visual: duplicate from_cell so the loader does not resolve a void.
-		to_cell = _cell_xyz(a)
-		to_stable = from_stable
+	if stored_from != stored_to and _occupancy.has(_key(stored_to)):
+		to_stable = _stable_of(int(_occupancy[_key(stored_to)]))
 	_append_hazard({
 		"id": _next_hazard_id(active_hazard_kind),
 		"from_room": from_stable,
 		"to_room": to_stable,
-		"from_cell": _cell_xyz(a),
-		"to_cell": to_cell,
+		"from_cell": _cell_xyz(stored_from),
+		"to_cell": _cell_xyz(stored_to),
 		"module_id": "",
 		"kind": active_hazard_kind,
-		"compartment_id": _compartment_for_link(from_id, b),
+		"compartment_id": _compartment_for_link(from_id, stored_to),
 		"rationale": "",
 	})
 
@@ -2147,11 +2163,28 @@ func _find_hazard(a: Vector3i, b: Vector3i, kind: String = "") -> int:
 	for i in _hazards.size():
 		var fa := _xyz_cell(_hazards[i]["from_cell"])
 		var ta := _xyz_cell(_hazards[i]["to_cell"])
-		if not ((fa == a and ta == b) or (fa == b and ta == a)):
-			continue
 		if kind != "" and str(_hazards[i]["kind"]) != kind:
 			continue
-		return i
+		if (fa == a and ta == b) or (fa == b and ta == a):
+			return i
+	# Void-neighbor commits store (a,a). Occupied a + void b of the same kind
+	# must inspect that collapsed pair, not append a duplicate.
+	if a != b and _occupancy.has(_key(a)) and not _occupancy.has(_key(b)):
+		for i in _hazards.size():
+			var fa2 := _xyz_cell(_hazards[i]["from_cell"])
+			var ta2 := _xyz_cell(_hazards[i]["to_cell"])
+			if kind != "" and str(_hazards[i]["kind"]) != kind:
+				continue
+			if fa2 == a and ta2 == a:
+				return i
+	if b != a and _occupancy.has(_key(b)) and not _occupancy.has(_key(a)):
+		for i in _hazards.size():
+			var fa3 := _xyz_cell(_hazards[i]["from_cell"])
+			var ta3 := _xyz_cell(_hazards[i]["to_cell"])
+			if kind != "" and str(_hazards[i]["kind"]) != kind:
+				continue
+			if fa3 == b and ta3 == b:
+				return i
 	return -1
 
 
@@ -2280,19 +2313,25 @@ func _prune_hazards() -> bool:
 	return changed
 
 
-func _refresh_hazard_rooms() -> void:
+func _refresh_hazard_rooms() -> bool:
+	var changed := false
 	for h in _hazards:
 		var a := _xyz_cell(h.get("from_cell", []))
 		var b := _xyz_cell(h.get("to_cell", []))
 		if not _occupancy.has(_key(a)):
 			continue
 		var from_id := int(_occupancy[_key(a)])
-		h["from_room"] = _stable_of(from_id)
+		var from_sid := _stable_of(from_id)
+		var to_sid := from_sid
 		if _occupancy.has(_key(b)):
-			h["to_room"] = _stable_of(int(_occupancy[_key(b)]))
-		else:
-			h["to_room"] = h["from_room"]
-		h["compartment_id"] = _compartment_for_link(from_id, b)
+			to_sid = _stable_of(int(_occupancy[_key(b)]))
+		var cid := _compartment_for_link(from_id, b)
+		if str(h.get("from_room", "")) != from_sid or str(h.get("to_room", "")) != to_sid or str(h.get("compartment_id", "")) != cid:
+			changed = true
+		h["from_room"] = from_sid
+		h["to_room"] = to_sid
+		h["compartment_id"] = cid
+	return changed
 
 
 func _compartment_for_link(from_id: int, to_cell: Vector3i) -> String:
@@ -2436,7 +2475,11 @@ func _update_hazard_ghost(cell: Vector3i) -> void:
 	var existing := _hazard_index_near(cell, _last_hit)
 	if existing >= 0:
 		_ghost.visible = false
-		hover_info.emit("select %s" % str(_hazards[existing].get("kind", "")))
+		var found_kind := str(_hazards[existing].get("kind", ""))
+		if found_kind == active_hazard_kind:
+			hover_info.emit("select %s" % found_kind)
+		else:
+			hover_info.emit("place %s on existing %s link" % [active_hazard_kind, found_kind])
 		return
 	if _occupancy.has(_key(cell)):
 		_place_cell_ghost(cell, "", "%s from (%d,%d) deck %d" % [active_hazard_kind, cell.x, cell.y, cell.z])

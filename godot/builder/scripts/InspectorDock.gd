@@ -701,12 +701,12 @@ func _atmosphere_honesty(role: String) -> String:
 	var cid := _LATTICE.compartment_for_role(role)
 	if cid.is_empty():
 		return "preview only — no hull compartment. v1 markers do not ignite, vent, or change suit O2."
-	return "On a boarded derelict, suit O2 always drains (field_atmosphere). This slider is hull/compartment state for mapped roles (bridge, engineering, cargo, hydroponics). v1 preview/export only — no live ignite."
+	return "On a boarded derelict, suit O2 always drains (field_atmosphere). This slider is hull/compartment state for mapped roles (bridge, engineering, cargo). hydroponics is a loader alias the builder cannot stamp. v1 preview/export only — no live ignite."
 
 
 func _hazard_honesty(compartment_id: String) -> String:
 	if compartment_id.strip_edges().is_empty():
-		return "Preview/export marker only — no live ignite. preview only — no hull compartment."
+		return "Preview/export marker only — no live ignite. Preview only — no hull compartment."
 	return "Preview/export marker only — no live ignite. Layout overlay is link-shaped; runtime ignition is a later follow-up."
 
 
