@@ -16,7 +16,9 @@ use derelict_core::structural::compile::{
 use derelict_core::structural::export::structural_plan_to_json;
 use derelict_core::structural::plan::{RoomId, StructuralPlan, Topology, NO_ROOM};
 use derelict_core::structural::sockets::SocketCatalog;
-use derelict_core::structural::validate::{validate, ValidationIssue, ValidationPolicy};
+use derelict_core::structural::validate::{
+    validate, ValidationIssue, ValidationPolicy, FLOOR_MODULES,
+};
 use derelict_core::topology::room_path;
 use derelict_core::Role;
 use godot::builtin::{GString, PackedStringArray, VarArray, VarDictionary, Variant, VariantType};
@@ -36,6 +38,7 @@ const KIT_FILES: &[&str] = &[
 ];
 const GAMEPLAY_PROPS_FILE: &str = "data/kits/gameplay_prop_v0.json";
 const SOCKET_DIR: &str = "data/placement/contracts/structural/ship_structural_v0";
+const SOCKET_CONTRACTS_PARENT: &str = "data/placement/contracts/structural";
 const VISUAL_BINDINGS_FILE: &str = "data/props/visual_bindings.generated.json";
 const COMPONENTS_FILE: &str = "data/components/component_catalog.json";
 const LOOT_TABLES_FILE: &str = "data/items/loot_tables.json";
@@ -58,6 +61,8 @@ pub struct DerelictAuthor {
     data: Option<AuthorPalettes>,
     #[init(val = Vec::new())]
     extra_kits: Vec<BuilderKitCatalog>,
+    #[init(val = BTreeMap::new())]
+    sockets_by_kit: BTreeMap<String, SocketCatalog>,
 }
 
 impl DerelictAuthor {
@@ -72,16 +77,55 @@ impl DerelictAuthor {
         }
     }
 
+    fn catalog_for(&self, kit_id: &str) -> Option<&SocketCatalog> {
+        self.sockets_by_kit
+            .get(kit_id)
+            .filter(|c| !c.modules.is_empty())
+            .or_else(|| {
+                self.data
+                    .as_ref()
+                    .map(|p| &p.sockets)
+                    .filter(|c| !c.modules.is_empty())
+            })
+    }
+
+    fn picker_for(&self, kit_id: &str) -> &dyn ModulePicker {
+        match self.catalog_for(kit_id) {
+            Some(catalog) => catalog,
+            None => &DefaultModulePicker,
+        }
+    }
+
+    fn floor_modules_for(&self, kit_id: &str) -> Option<Vec<String>> {
+        let catalog = self.catalog_for(kit_id)?;
+        let mut ids: Vec<String> = catalog
+            .modules
+            .values()
+            .filter(|m| {
+                m.sockets
+                    .iter()
+                    .any(|s| s.kind == "floor_edge" || s.kind == "floor_top")
+            })
+            .map(|m| m.module_id.clone())
+            .collect();
+        if ids.is_empty() {
+            return Some(FLOOR_MODULES.iter().map(|s| (*s).to_string()).collect());
+        }
+        ids.sort();
+        ids.dedup();
+        Some(ids)
+    }
+
     fn compile_golden(&self, golden: &GoldenArea) -> Result<CompileOut, String> {
         let topology = golden.to_topology()?;
-        let picker: &dyn ModulePicker = match self.data.as_ref() {
-            Some(p) if !p.sockets.modules.is_empty() => &p.sockets,
-            _ => &DefaultModulePicker,
-        };
+        let picker = self.picker_for(&golden.kit_id);
         let (plan, stale) = compile_authored(&topology, picker, &golden.module_overrides);
         let mut issues = Vec::new();
         match author_policy(golden, &topology) {
-            Ok(policy) => {
+            Ok(mut policy) => {
+                if let Some(floors) = self.floor_modules_for(&golden.kit_id) {
+                    policy.allowed_floor_modules = Some(floors);
+                }
                 if let Err(v) = validate(&plan, &topology, &policy) {
                     issues.extend(v);
                 }
@@ -123,6 +167,7 @@ impl DerelictAuthor {
             let item_count = palettes.items.len();
             self.data = Some(palettes);
             self.extra_kits = Vec::new();
+            self.sockets_by_kit = BTreeMap::new();
             return content_root_result(true, &[], item_count, &errors);
         }
 
@@ -132,6 +177,7 @@ impl DerelictAuthor {
                 errors.push(e);
                 self.data = Some(palettes);
                 self.extra_kits = Vec::new();
+                self.sockets_by_kit = BTreeMap::new();
                 return content_root_result(false, &[], self.palettes_ref().items.len(), &errors);
             }
         };
@@ -163,6 +209,28 @@ impl DerelictAuthor {
         match SocketCatalog::load_dir(&socket_dir) {
             Ok(cat) => palettes.sockets = cat,
             Err(e) => errors.push(format!("{SOCKET_DIR}: {e}")),
+        }
+
+        let mut sockets_by_kit: BTreeMap<String, SocketCatalog> = BTreeMap::new();
+        for kit in &kits {
+            if kit.kit_id.is_empty() {
+                continue;
+            }
+            let dir = root.join(SOCKET_CONTRACTS_PARENT).join(&kit.kit_id);
+            if !dir.is_dir() {
+                continue;
+            }
+            match SocketCatalog::load_dir(&dir) {
+                Ok(cat) => {
+                    sockets_by_kit.insert(kit.kit_id.clone(), cat);
+                }
+                Err(e) => errors.push(format!("{SOCKET_CONTRACTS_PARENT}/{}: {e}", kit.kit_id)),
+            }
+        }
+        if !palettes.sockets.modules.is_empty() {
+            sockets_by_kit
+                .entry(PRIMARY_KIT.to_string())
+                .or_insert_with(|| palettes.sockets.clone());
         }
 
         match read_under(&root, VISUAL_BINDINGS_FILE) {
@@ -210,6 +278,7 @@ impl DerelictAuthor {
         let kit_ids: Vec<String> = kits.iter().map(|k| k.kit_id.clone()).collect();
         let item_count = palettes.items.len();
         self.extra_kits = kits;
+        self.sockets_by_kit = sockets_by_kit;
         self.data = Some(palettes);
         content_root_result(errors.is_empty(), &kit_ids, item_count, &errors)
     }
@@ -922,30 +991,10 @@ mod tests {
 
     #[test]
     fn every_role_is_listed() {
-        for role in every_role() {
-            match role {
-                Role::Airlock
-                | Role::Dock
-                | Role::Corridor
-                | Role::MainSpine
-                | Role::Hub
-                | Role::Ramp
-                | Role::Elevator
-                | Role::Bridge
-                | Role::Engineering
-                | Role::Reactor
-                | Role::LifeSupport
-                | Role::Maintenance
-                | Role::Cargo
-                | Role::Hangar
-                | Role::Storage
-                | Role::Armory
-                | Role::Security
-                | Role::Medical
-                | Role::CrewQuarters
-                | Role::MessHall
-                | Role::Compartment => {}
-            }
+        let listed: Vec<Role> = every_role().collect();
+        assert_eq!(listed.len(), Role::ALL.len(), "every_role missed a variant");
+        for role in Role::ALL {
+            assert!(listed.contains(&role), "every_role missing {}", role.name());
         }
     }
 
