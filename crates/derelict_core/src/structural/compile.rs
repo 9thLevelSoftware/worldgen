@@ -287,7 +287,7 @@ fn wrapper_required(e: &EdgeRecord) -> bool {
     e.wrapper_required
 }
 
-fn edge_set_wrapper_required(e: &mut EdgeRecord) {
+pub(crate) fn edge_set_wrapper_required(e: &mut EdgeRecord) {
     e.wrapper_required = e.kind != EdgeKind::Open && !e.module_id.is_empty();
 }
 
@@ -386,7 +386,7 @@ fn apply_vertex_modules(
 /// edges (both directions recorded), matching the game's floor_edge ↔
 /// wall_base contract without needing per-contract position data. (The
 /// socket catalog layer validates real socket compatibility when loaded.)
-fn emit_socket_bindings(plan: &mut StructuralPlan) {
+pub(crate) fn emit_socket_bindings(plan: &mut StructuralPlan) {
     let placed_edges: BTreeMap<String, String> = plan
         .placements
         .iter()
