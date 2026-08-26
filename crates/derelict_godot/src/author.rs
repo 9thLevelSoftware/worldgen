@@ -13,12 +13,12 @@ use derelict_core::structural::compile::{
     FLOOR_MODULE, HATCH_MODULE, INNER_CORNER_MODULE, LOCKED_MODULE, OUTER_CORNER_MODULE,
     T_JUNCTION_MODULE, WALL_MODULE,
 };
-use derelict_core::structural::plan::{
-    DamageVariant, EdgeRecord, FloorPlacement, RoomId, StructuralPlan, Topology, NO_ROOM,
-};
-use derelict_core::structural::sockets::{SocketCatalog, SocketModulePicker};
+use derelict_core::structural::export::structural_plan_to_json;
+use derelict_core::structural::plan::{RoomId, StructuralPlan, Topology, NO_ROOM};
+use derelict_core::structural::sockets::SocketCatalog;
 use derelict_core::structural::validate::{validate, ValidationIssue, ValidationPolicy};
 use derelict_core::topology::room_path;
+use derelict_core::Role;
 use godot::builtin::{GString, PackedStringArray, VarArray, VarDictionary, Variant, VariantType};
 use godot::classes::RefCounted;
 use godot::meta::ToGodot;
@@ -63,7 +63,7 @@ pub struct DerelictAuthor {
 impl DerelictAuthor {
     fn palettes_ref(&mut self) -> &AuthorPalettes {
         self.ensure_palettes();
-        self.data.as_ref().unwrap()
+        self.data.as_ref().expect("palettes initialized")
     }
 
     fn ensure_palettes(&mut self) {
@@ -72,23 +72,11 @@ impl DerelictAuthor {
         }
     }
 
-    fn contracts_loaded(&self) -> bool {
-        self.data
-            .as_ref()
-            .is_some_and(|p| !p.sockets.modules.is_empty())
-    }
-
     fn compile_golden(&self, golden: &GoldenArea) -> Result<CompileOut, String> {
         let topology = golden.to_topology()?;
-        let palettes = self.data.as_ref();
-        let socket_picker;
-        let picker: &dyn ModulePicker = if palettes.is_some_and(|p| !p.sockets.modules.is_empty()) {
-            socket_picker = SocketModulePicker {
-                catalog: palettes.unwrap().sockets.clone(),
-            };
-            &socket_picker
-        } else {
-            &DefaultModulePicker
+        let picker: &dyn ModulePicker = match self.data.as_ref() {
+            Some(p) if !p.sockets.modules.is_empty() => &p.sockets,
+            _ => &DefaultModulePicker,
         };
         let (plan, stale) = compile_authored(&topology, picker, &golden.module_overrides);
         let mut issues = Vec::new();
@@ -229,9 +217,11 @@ impl DerelictAuthor {
     /// Grouped palettes for the builder UI.
     #[func]
     fn palettes(&mut self) -> VarDictionary {
-        let extra = self.extra_kits.clone();
-        let p = self.palettes_ref();
-        palettes_to_dict(p, &extra)
+        self.ensure_palettes();
+        palettes_to_dict(
+            self.data.as_ref().expect("palettes initialized"),
+            &self.extra_kits,
+        )
     }
 
     #[func]
@@ -321,12 +311,9 @@ impl DerelictAuthor {
     #[func]
     fn legal_modules(&mut self, kind: GString, state: GString) -> PackedStringArray {
         self.ensure_palettes();
-        let ids = legal_module_ids(
-            self.contracts_loaded()
-                .then(|| &self.data.as_ref().unwrap().sockets),
-            &kind.to_string(),
-            &state.to_string(),
-        );
+        let sockets = &self.data.as_ref().expect("palettes initialized").sockets;
+        let catalog = (!sockets.modules.is_empty()).then_some(sockets);
+        let ids = legal_module_ids(catalog, &kind.to_string(), &state.to_string());
         PackedStringArray::from_iter(ids.into_iter().map(|s| GString::from(s.as_str())))
     }
 }
@@ -582,7 +569,9 @@ fn compile_to_dict(out: &CompileOut) -> VarDictionary {
     let mut d = VarDictionary::new();
     d.set(
         "plan",
-        &json_to_dict(&plan_to_json(&out.plan, |id| name_of(id, &out.golden_ids))),
+        &json_to_dict(&structural_plan_to_json(&out.plan, &|id| {
+            name_of(id, &out.golden_ids)
+        })),
     );
     d.set("zones", &json_to_dict(&zones_to_json(out)));
     d.set("issues", &issues_array(&out.issues));
@@ -599,135 +588,8 @@ fn name_of(id: RoomId, ids: &BTreeMap<RoomId, String>) -> String {
     }
 }
 
-fn variant_name(v: DamageVariant) -> &'static str {
-    match v {
-        DamageVariant::Intact => "intact",
-        DamageVariant::Damaged => "damaged",
-        DamageVariant::Breached => "breached",
-    }
-}
-
-fn cell2(x: i32, y: i32) -> Value {
-    json!([x, y])
-}
-
 fn cell3(x: i32, y: i32, deck: u8) -> Value {
     json!([x, y, deck])
-}
-
-fn pos(p: [f32; 3]) -> Value {
-    json!([p[0], p[1], p[2]])
-}
-
-fn plan_to_json(plan: &StructuralPlan, name_of: impl Fn(RoomId) -> String) -> Value {
-    let edge_json = |e: &EdgeRecord, with_placement_id: bool| -> Value {
-        let mut m = Map::new();
-        m.insert("id".into(), json!(format!("edge:{}", e.edge_key)));
-        m.insert("key".into(), json!(e.edge_key));
-        m.insert("edge_key".into(), json!(e.edge_key));
-        m.insert("deck".into(), json!(e.cell.deck));
-        m.insert("cell".into(), cell2(e.cell.x, e.cell.y));
-        m.insert("direction".into(), json!(e.direction.name()));
-        m.insert(
-            "opposite_direction".into(),
-            json!(e.direction.opposite().name()),
-        );
-        m.insert(
-            "source_cells".into(),
-            json!([
-                cell3(
-                    e.source_cells[0].x,
-                    e.source_cells[0].y,
-                    e.source_cells[0].deck
-                ),
-                cell3(
-                    e.source_cells[1].x,
-                    e.source_cells[1].y,
-                    e.source_cells[1].deck
-                )
-            ]),
-        );
-        m.insert(
-            "room_ids".into(),
-            json!([name_of(e.room_ids.0), name_of(e.room_ids.1)]),
-        );
-        m.insert("owner_room".into(), json!(name_of(e.room_ids.0)));
-        m.insert("other_room".into(), json!(name_of(e.room_ids.1)));
-        m.insert("kind".into(), json!(e.kind.name()));
-        m.insert("state".into(), json!(e.kind.name()));
-        m.insert("module_id".into(), json!(e.module_id));
-        m.insert("variant".into(), json!(variant_name(e.variant)));
-        m.insert("position".into(), pos(e.position));
-        m.insert("yaw_degrees".into(), json!(e.yaw_degrees as f32));
-        m.insert("portal".into(), json!(e.portal));
-        m.insert("exterior".into(), json!(e.exterior));
-        m.insert("placement_required".into(), json!(e.wrapper_required));
-        m.insert("wrapper_required".into(), json!(e.wrapper_required));
-        if with_placement_id {
-            m.insert("placement_id".into(), json!(format!("edge:{}", e.edge_key)));
-        }
-        m.insert("socket_bindings".into(), json!([]));
-        Value::Object(m)
-    };
-
-    let occupancy: Map<String, Value> = plan
-        .occupancy
-        .iter()
-        .map(|(k, rec)| {
-            (
-                k.clone(),
-                json!({
-                    "cell_key": k,
-                    "deck": rec.cell.deck,
-                    "cell": cell2(rec.cell.x, rec.cell.y),
-                    "room_id": name_of(rec.room_id),
-                    "room_ids": [name_of(rec.room_id)],
-                    "position": pos(rec.cell.world_pos()),
-                    "module_id": rec.module_id,
-                    "variant": variant_name(rec.variant),
-                    "decal": rec.decal,
-                }),
-            )
-        })
-        .collect();
-    let edges: Map<String, Value> = plan
-        .edges
-        .iter()
-        .map(|(k, e)| (k.clone(), edge_json(e, false)))
-        .collect();
-    let placements: Vec<Value> = plan.placements.iter().map(|e| edge_json(e, true)).collect();
-    let flat_placement = |f: &FloorPlacement| {
-        json!({
-            "id": f.id,
-            "placement_id": f.id,
-            "module_id": f.module_id,
-            "position": pos(f.position),
-            "yaw_degrees": f.yaw_degrees as f32,
-            "deck": f.cell.deck,
-            "cell": cell2(f.cell.x, f.cell.y),
-            "cell_key": f.cell_key,
-            "room_id": name_of(f.room_id),
-            "room_ids": [name_of(f.room_id)],
-            "variant": variant_name(f.variant),
-            "socket_bindings": [],
-        })
-    };
-
-    json!({
-        "occupancy": occupancy,
-        "edges": edges,
-        "placements": placements,
-        "floor_placements": plan.floor_placements.iter().map(flat_placement).collect::<Vec<_>>(),
-        "ceiling_placements": plan.ceiling_placements.iter().map(flat_placement).collect::<Vec<_>>(),
-        "socket_bindings": plan.socket_bindings.iter().map(|b| json!({
-            "placement_id": b.placement_id,
-            "socket_id": b.socket_id,
-            "neighbor_placement_id": b.neighbor_placement_id,
-            "neighbor_socket_id": b.neighbor_socket_id,
-            "kind": b.kind,
-        })).collect::<Vec<_>>(),
-        "errors": plan.errors,
-    })
 }
 
 fn zones_to_json(out: &CompileOut) -> Value {
@@ -838,16 +700,18 @@ fn resolve_stable_id(golden: &GoldenArea, stable_id: &str) -> Result<RoomId, Str
         .ok_or_else(|| format!("unknown room stable_id '{stable_id}'"))
 }
 
-fn legal_module_ids(catalog: Option<&SocketCatalog>, kind: &str, state: &str) -> Vec<String> {
+pub(crate) fn legal_module_ids(
+    catalog: Option<&SocketCatalog>,
+    kind: &str,
+    state: &str,
+) -> Vec<String> {
     let kind = kind.trim().to_ascii_lowercase();
     let state = state.trim();
     let state_l = state.to_ascii_lowercase();
     let (required, preferred): (&[&str], &str) = match kind.as_str() {
         "floor" => {
-            let connective = matches!(
-                state_l.as_str(),
-                "connective" | "corridor" | "main_spine" | "hub" | "airlock" | "dock"
-            );
+            let connective =
+                state_l == "connective" || Role::parse(&state_l).is_some_and(Role::is_connective);
             (
                 &["floor_edge", "floor_top"],
                 if connective {
@@ -969,21 +833,29 @@ fn variant_to_json(v: &Variant) -> Result<Value, String> {
     }
 }
 
+const FLOAT_KEYS: &[&str] = &["yaw_degrees", "position", "allowed_yaw_deg"];
+
 fn json_to_dict(value: &Value) -> VarDictionary {
     let mut d = VarDictionary::new();
     let Some(obj) = value.as_object() else {
         return d;
     };
     for (k, v) in obj {
-        d.set(k.as_str(), &json_to_variant(v));
+        d.set(k.as_str(), &json_to_variant_keyed(Some(k.as_str()), v));
     }
     d
 }
 
 fn json_to_variant(value: &Value) -> Variant {
+    json_to_variant_keyed(None, value)
+}
+
+fn json_to_variant_keyed(key: Option<&str>, value: &Value) -> Variant {
+    let as_float = key.is_some_and(|k| FLOAT_KEYS.contains(&k));
     match value {
         Value::Null => Variant::nil(),
         Value::Bool(b) => b.to_variant(),
+        Value::Number(n) if as_float => n.as_f64().unwrap_or(0.0).to_variant(),
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 i.to_variant()
@@ -998,13 +870,108 @@ fn json_to_variant(value: &Value) -> Variant {
             }
         }
         Value::String(s) => GString::from(s.as_str()).to_variant(),
+        Value::Array(a) if as_float => {
+            let mut arr = VarArray::new();
+            for x in a {
+                arr.push(&json_to_variant_keyed(key, x));
+            }
+            arr.to_variant()
+        }
         Value::Array(a) => {
             let mut arr = VarArray::new();
             for x in a {
-                arr.push(&json_to_variant(x));
+                arr.push(&json_to_variant_keyed(None, x));
             }
             arr.to_variant()
         }
         Value::Object(_) => json_to_dict(value).to_variant(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn every_role() -> impl Iterator<Item = Role> {
+        use Role::*;
+        [
+            Airlock,
+            Dock,
+            Corridor,
+            MainSpine,
+            Hub,
+            Ramp,
+            Elevator,
+            Bridge,
+            Engineering,
+            Reactor,
+            LifeSupport,
+            Maintenance,
+            Cargo,
+            Hangar,
+            Storage,
+            Armory,
+            Security,
+            Medical,
+            CrewQuarters,
+            MessHall,
+            Compartment,
+        ]
+        .into_iter()
+    }
+
+    #[test]
+    fn every_role_is_listed() {
+        for role in every_role() {
+            match role {
+                Role::Airlock
+                | Role::Dock
+                | Role::Corridor
+                | Role::MainSpine
+                | Role::Hub
+                | Role::Ramp
+                | Role::Elevator
+                | Role::Bridge
+                | Role::Engineering
+                | Role::Reactor
+                | Role::LifeSupport
+                | Role::Maintenance
+                | Role::Cargo
+                | Role::Hangar
+                | Role::Storage
+                | Role::Armory
+                | Role::Security
+                | Role::Medical
+                | Role::CrewQuarters
+                | Role::MessHall
+                | Role::Compartment => {}
+            }
+        }
+    }
+
+    #[test]
+    fn offline_floor_legal_matches_default_picker() {
+        let picker = DefaultModulePicker;
+        for role in every_role() {
+            let ids = legal_module_ids(None, "floor", role.name());
+            let expected = picker.floor(role.is_connective());
+            assert_eq!(ids, vec![expected], "role {}", role.name());
+        }
+        assert_eq!(
+            legal_module_ids(None, "floor", "connective"),
+            vec![CORRIDOR_FLOOR_MODULE.to_string()]
+        );
+        assert_eq!(
+            legal_module_ids(None, "floor", "ramp"),
+            vec![CORRIDOR_FLOOR_MODULE.to_string()]
+        );
+        assert_eq!(
+            legal_module_ids(None, "floor", "elevator"),
+            vec![CORRIDOR_FLOOR_MODULE.to_string()]
+        );
+        assert_eq!(
+            legal_module_ids(None, "floor", "bridge"),
+            vec![FLOOR_MODULE.to_string()]
+        );
     }
 }

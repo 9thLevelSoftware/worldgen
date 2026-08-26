@@ -168,23 +168,20 @@ pub struct SocketModulePicker {
     pub catalog: SocketCatalog,
 }
 
-impl ModulePicker for SocketModulePicker {
+impl ModulePicker for SocketCatalog {
     fn floor(&self, role_is_connective: bool) -> String {
         let preferred = if role_is_connective {
             "corridor_floor_1x1"
         } else {
             "floor_1x1"
         };
-        self.catalog
-            .choose_module(&["floor_edge", "floor_top"], preferred)
+        self.choose_module(&["floor_edge", "floor_top"], preferred)
     }
     fn ceiling(&self) -> String {
-        self.catalog
-            .choose_module(&["ceiling_edge", "ceiling_bottom"], "ceiling_cap_1x1")
+        self.choose_module(&["ceiling_edge", "ceiling_bottom"], "ceiling_cap_1x1")
     }
     fn wall(&self) -> String {
-        self.catalog
-            .choose_module(&["wall_base", "wall_end"], "wall_straight_1x1")
+        self.choose_module(&["wall_base", "wall_end"], "wall_straight_1x1")
     }
     fn portal(&self, state: EdgeKind) -> String {
         let preferred = match state {
@@ -193,8 +190,7 @@ impl ModulePicker for SocketModulePicker {
             EdgeKind::Breach => return String::new(),
             _ => "doorway_frame_open_1x1",
         };
-        self.catalog
-            .choose_module(&["portal_edge", "wall_base"], preferred)
+        self.choose_module(&["portal_edge", "wall_base"], preferred)
     }
     fn vertex(&self, kind: VertexKind) -> Option<String> {
         let (kinds, preferred): (&[&str], &str) = match kind {
@@ -202,14 +198,32 @@ impl ModulePicker for SocketModulePicker {
             VertexKind::OuterCorner => (&["outer_corner_vertex"], "wall_outer_corner"),
             VertexKind::TJunction => (&["wall_face"], "wall_t_junction"),
         };
-        if kind == VertexKind::TJunction && self.catalog.modules.contains_key("wall_t_junction") {
+        if kind == VertexKind::TJunction && self.modules.contains_key("wall_t_junction") {
             return Some("wall_t_junction".into());
         }
-        let chosen = self.catalog.choose_module(kinds, preferred);
-        if self.catalog.modules.contains_key(&chosen) {
+        let chosen = self.choose_module(kinds, preferred);
+        if self.modules.contains_key(&chosen) {
             Some(chosen)
         } else {
             None
         }
+    }
+}
+
+impl ModulePicker for SocketModulePicker {
+    fn floor(&self, role_is_connective: bool) -> String {
+        self.catalog.floor(role_is_connective)
+    }
+    fn ceiling(&self) -> String {
+        self.catalog.ceiling()
+    }
+    fn wall(&self) -> String {
+        self.catalog.wall()
+    }
+    fn portal(&self, state: EdgeKind) -> String {
+        self.catalog.portal(state)
+    }
+    fn vertex(&self, kind: VertexKind) -> Option<String> {
+        self.catalog.vertex(kind)
     }
 }
