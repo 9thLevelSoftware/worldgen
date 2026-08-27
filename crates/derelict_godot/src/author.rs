@@ -65,6 +65,8 @@ pub struct DerelictAuthor {
     sockets_by_kit: BTreeMap<String, SocketCatalog>,
     #[init(val = BTreeSet::new())]
     kit_definition_ids: BTreeSet<String>,
+    #[init(val = BTreeMap::new())]
+    kit_module_ids: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl DerelictAuthor {
@@ -146,6 +148,43 @@ fn floor_module_ids(catalog: &SocketCatalog) -> Vec<String> {
     ids
 }
 
+fn plan_modules_missing_from_kit_definition(
+    plan: &StructuralPlan,
+    defined_modules: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut referenced = BTreeSet::new();
+    referenced.extend(
+        plan.occupancy.values().filter_map(|record| {
+            (!record.module_id.is_empty()).then_some(record.module_id.as_str())
+        }),
+    );
+    referenced.extend(
+        plan.edges.values().filter_map(|record| {
+            (!record.module_id.is_empty()).then_some(record.module_id.as_str())
+        }),
+    );
+    referenced.extend(
+        plan.placements.iter().filter_map(|record| {
+            (!record.module_id.is_empty()).then_some(record.module_id.as_str())
+        }),
+    );
+    referenced.extend(
+        plan.floor_placements.iter().filter_map(|record| {
+            (!record.module_id.is_empty()).then_some(record.module_id.as_str())
+        }),
+    );
+    referenced.extend(
+        plan.ceiling_placements.iter().filter_map(|record| {
+            (!record.module_id.is_empty()).then_some(record.module_id.as_str())
+        }),
+    );
+    referenced
+        .into_iter()
+        .filter(|module_id| !defined_modules.contains(*module_id))
+        .map(str::to_string)
+        .collect()
+}
+
 /// GoldenArea documents created before kits were persisted have an empty
 /// `kit_id`. Keep that legacy representation readable while resolving it at
 /// every kit-aware bridge boundary.
@@ -218,6 +257,7 @@ impl DerelictAuthor {
             self.extra_kits = Vec::new();
             self.sockets_by_kit = BTreeMap::new();
             self.kit_definition_ids = BTreeSet::new();
+            self.kit_module_ids = BTreeMap::new();
             return content_root_result(true, &[], item_count, &errors);
         }
 
@@ -229,6 +269,7 @@ impl DerelictAuthor {
                 self.extra_kits = Vec::new();
                 self.sockets_by_kit = BTreeMap::new();
                 self.kit_definition_ids = BTreeSet::new();
+                self.kit_module_ids = BTreeMap::new();
                 return content_root_result(false, &[], self.palettes_ref().items.len(), &errors);
             }
         };
@@ -266,6 +307,20 @@ impl DerelictAuthor {
         }
 
         let mut sockets_by_kit: BTreeMap<String, SocketCatalog> = BTreeMap::new();
+        let kit_module_ids: BTreeMap<String, BTreeSet<String>> = kits
+            .iter()
+            .filter(|kit| !kit.kit_id.is_empty())
+            .map(|kit| {
+                (
+                    kit.kit_id.clone(),
+                    kit.modules
+                        .iter()
+                        .filter(|module| !module.module_id.is_empty())
+                        .map(|module| module.module_id.clone())
+                        .collect(),
+                )
+            })
+            .collect();
         for kit in &kits {
             if kit.kit_id.is_empty() {
                 continue;
@@ -334,6 +389,7 @@ impl DerelictAuthor {
         self.extra_kits = kits;
         self.sockets_by_kit = sockets_by_kit;
         self.kit_definition_ids = kit_definition_ids;
+        self.kit_module_ids = kit_module_ids;
         self.data = Some(palettes);
         content_root_result(errors.is_empty(), &kit_ids, item_count, &errors)
     }
@@ -473,6 +529,28 @@ impl DerelictAuthor {
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
+                    return export_error_dict(&e);
+                }
+                let defined_modules = match self.kit_module_ids.get(&golden.kit_id) {
+                    Some(modules) => modules,
+                    None => {
+                        let e = format!(
+                            "kit definition '{}' has no retained module catalog; refusing playable export",
+                            golden.kit_id
+                        );
+                        godot::global::godot_error!("DerelictAuthor.export_playable: {e}");
+                        return export_error_dict(&e);
+                    }
+                };
+                let missing_modules =
+                    plan_modules_missing_from_kit_definition(&compiled.plan, defined_modules);
+                if !missing_modules.is_empty() {
+                    let e = format!(
+                        "compiled plan references modules absent from kit definition '{}': {}",
+                        golden.kit_id,
+                        missing_modules.join(", ")
+                    );
+                    godot::global::godot_error!("DerelictAuthor.export_playable: {e}");
                     return export_error_dict(&e);
                 }
                 // A playable bundle references real kit assets. The embedded
@@ -1429,5 +1507,24 @@ mod tests {
         // produce an empty allowlist. Authorizing FLOOR_MODULES here would
         // silently borrow modules from the primary kit.
         assert!(floor_module_ids(&catalog).is_empty());
+    }
+
+    #[test]
+    fn compiled_plan_rejects_catalog_module_missing_from_kit_definition() {
+        let mut plan = StructuralPlan::default();
+        plan.occupancy.insert(
+            "0|0|0".to_string(),
+            derelict_core::structural::plan::CellRecord {
+                cell: derelict_core::structural::plan::Cell::new(0, 0, 0),
+                room_id: 1,
+                module_id: "catalog_only_floor".to_string(),
+                decal: 0,
+                variant: Default::default(),
+            },
+        );
+
+        let definition = BTreeSet::from(["defined_floor".to_string()]);
+        let missing = plan_modules_missing_from_kit_definition(&plan, &definition);
+        assert_eq!(missing, vec!["catalog_only_floor"]);
     }
 }
