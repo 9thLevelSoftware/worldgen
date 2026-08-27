@@ -229,7 +229,6 @@ func flush_recovery_for_test() -> Dictionary:
 	if bool(result.get("ok", false)):
 		_recovery_pending = false
 		result["written"] = true
-		recovery_available.emit(recovery_path())
 	return result
 
 func _canonicalize(document: Dictionary) -> Dictionary:
@@ -274,6 +273,9 @@ func _save_to(path: String) -> Dictionary:
 		_saved_canonical = content
 		_recovery_pending = false
 		_stop_recovery_timer()
+		# A successful source save supersedes any crash-recovery snapshot.
+		if has_recovery():
+			discard_recovery()
 		_remember(path)
 		dirty_changed.emit(false)
 	return result

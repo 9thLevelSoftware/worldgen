@@ -994,6 +994,7 @@ func _on_props_changed() -> void:
 	golden = _golden_from_lattice()
 	_commit_session_document("Prop edit")
 	_refresh_prop_preview()
+	_schedule_compile()
 
 
 func _on_hazard_selected(zone: Dictionary) -> void:
@@ -1019,6 +1020,7 @@ func _on_hazards_changed() -> void:
 	golden = _golden_from_lattice()
 	_commit_session_document("Gameplay edit")
 	_preview.apply_hazards(_lattice.get_hazards())
+	_schedule_compile()
 
 
 func _room_by_id(id: int) -> Dictionary:

@@ -224,6 +224,20 @@ func _check_stamp_role_compartment() -> void:
 	lattice.stamp_role("airlock")
 	if str(lattice.get_hazards()[0].get("compartment_id", "")) != "":
 		_fail("stamp_role airlock should clear stale engineering cid")
+	# Coalescing adjacent rooms must prune a portal that is no longer a room edge.
+	var portal_lattice = Lattice.new()
+	root.add_child(portal_lattice)
+	portal_lattice.active_role = "cargo"
+	portal_lattice.paint_cell(Vector3i(0, 0, 0))
+	portal_lattice.create_room()
+	portal_lattice.active_role = "bridge"
+	portal_lattice.paint_cell(Vector3i(1, 0, 0))
+	portal_lattice.try_place_portal(Vector3i(0, 0, 0), Vector3i(1, 0, 0))
+	portal_lattice.select_room_id(int(portal_lattice.get_rooms()[1].get("id", 0)))
+	portal_lattice.stamp_role("cargo")
+	if not portal_lattice.get_portals().is_empty():
+		_fail("role coalescing should prune invalid portal")
+	portal_lattice.free()
 	print("STAMP_ROLE_OK compartment_id refresh")
 	lattice.free()
 

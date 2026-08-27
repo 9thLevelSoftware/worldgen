@@ -5,6 +5,7 @@ const NAMESPACE := "builder_session_check"
 const SOURCE_PATH := "user://derelict_builder_builder_session_check.json"
 
 var failed := false
+var recovery_notifications := 0
 
 func _initialize() -> void:
 	if not ClassDB.class_exists("DerelictAuthor"):
@@ -25,8 +26,10 @@ func _initialize() -> void:
 		return
 	var session := SESSION_SCRIPT.new()
 	root.add_child(session)
+	session.recovery_available.connect(func(_path: String) -> void: recovery_notifications += 1)
 	session.initialize(author, NAMESPACE)
 	session.discard_recovery()
+	recovery_notifications = 0
 	_check_new_commit_undo_redo(session, golden)
 	_check_save_reopen(session, golden)
 	_check_recovery(session, golden)
@@ -64,7 +67,13 @@ func _check_recovery(session: BuilderSession, golden: Dictionary) -> void:
 	var flushed := session.flush_recovery_for_test()
 	_expect(bool(flushed.get("ok", false)) and bool(flushed.get("written", true)), "recovery snapshot writes")
 	_expect(session.has_recovery(), "recovery is discoverable")
+	_expect(recovery_notifications == 0, "autosave does not announce recovery")
+	var saved := session.save_document_as(SOURCE_PATH)
+	_expect(bool(saved.get("ok", false)), "save supersedes recovery")
+	_expect(not session.has_recovery(), "successful save removes recovery snapshot")
 	session.start_new(golden)
+	session.commit_document(changed, "Recovery edit 2")
+	session.flush_recovery_for_test()
 	var restored := session.restore_recovery()
 	_expect(bool(restored.get("ok", false)), "recovery restores")
 	_expect(str(session.source_document.get("display_name", "")) == "Recovered Session", "recovery restores latest document")

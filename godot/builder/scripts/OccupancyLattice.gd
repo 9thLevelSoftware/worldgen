@@ -944,6 +944,7 @@ func stamp_role(role: String) -> void:
 	if changed:
 		room["role"] = role
 		_coalesce_touching_same_role()
+		_prune_links()
 		room = get_selected()
 	var hz_changed := _refresh_hazard_rooms()
 	_sync_floors()
@@ -967,6 +968,7 @@ func apply_room_edit(edited: Dictionary) -> void:
 		if not role.is_empty():
 			r["role"] = role
 			_coalesce_touching_same_role()
+			_prune_links()
 			r = get_selected()
 		var hz_changed := _refresh_hazard_rooms()
 		_sync_floors()
