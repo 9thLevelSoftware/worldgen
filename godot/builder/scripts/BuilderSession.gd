@@ -121,7 +121,7 @@ func commit_document(document: Dictionary, label: String = "Edit") -> bool:
 	_undo_stack.append(before)
 	_redo_stack.clear()
 	source_document = canonical
-	_schedule_recovery()
+	_update_recovery_state()
 	document_changed.emit(source_document)
 	dirty_changed.emit(has_unsaved_changes())
 	history_changed.emit(can_undo(), can_redo())
@@ -136,7 +136,7 @@ func undo() -> Dictionary:
 		return _error(_last_error)
 	_redo_stack.append(current)
 	source_document = target
-	_schedule_recovery()
+	_update_recovery_state()
 	document_changed.emit(source_document)
 	dirty_changed.emit(has_unsaved_changes())
 	history_changed.emit(can_undo(), can_redo())
@@ -151,7 +151,7 @@ func redo() -> Dictionary:
 		return _error(_last_error)
 	_undo_stack.append(current)
 	source_document = target
-	_schedule_recovery()
+	_update_recovery_state()
 	document_changed.emit(source_document)
 	dirty_changed.emit(has_unsaved_changes())
 	history_changed.emit(can_undo(), can_redo())
@@ -346,6 +346,19 @@ func _schedule_recovery() -> void:
 		_recovery_timer.start(RECOVERY_DEBOUNCE_S)
 	else:
 		call_deferred("_start_recovery_timer")
+
+
+func _update_recovery_state() -> void:
+	if has_unsaved_changes():
+		_schedule_recovery()
+		return
+	# Returning to the saved canonical document is clean. Cancel any pending
+	# debounce and remove a snapshot from an earlier dirty state so the next
+	# launch cannot offer already-saved work for recovery.
+	_recovery_pending = false
+	_stop_recovery_timer()
+	if has_recovery():
+		discard_recovery()
 
 
 func _start_recovery_timer() -> void:

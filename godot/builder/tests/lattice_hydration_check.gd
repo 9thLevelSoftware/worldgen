@@ -22,6 +22,8 @@ func _run_checks() -> void:
 	else:
 		_check_hydrated(lattice)
 		_check_reset(lattice)
+	_check_exterior_hazard_hydration()
+	_check_three_way_coalescence()
 
 	lattice.free()
 	_finish()
@@ -73,6 +75,73 @@ func _check_reset(lattice: Node) -> void:
 		_fail("reset did not restore deck state")
 	if lattice.has_pending_click():
 		_fail("reset left a pending endpoint")
+
+
+func _check_exterior_hazard_hydration() -> void:
+	var Lattice := load("res://scripts/OccupancyLattice.gd")
+	var lattice = Lattice.new()
+	root.add_child(lattice)
+	var document := {
+		"topology": {
+			"rooms": [{"id": 1, "stable_id": "airlock_01", "role": "airlock", "deck": 0, "cells": [[0, 0]]}],
+			"portals": [{"from_room": 1, "to_room": 0, "from_cell": [0, 0, 0], "to_cell": [1, 0, 0], "state": "BREACH", "exterior": true}],
+			"verticals": [],
+		},
+		"props": [],
+		"hazards": {
+			"source": "authored",
+			"fire_zones": [{"id": "fire_01", "from_room": "airlock_01", "to_room": "airlock_01", "from_cell": [0, 0, 0], "to_cell": [1, 0, 0]}],
+			"breach_zones": [], "arc_zones": [], "radiation_zones": [],
+		},
+	}
+	var result: Dictionary = lattice.hydrate_document(document)
+	if not result.get("ok", false):
+		_fail("matching exterior hazard should hydrate: %s" % result.get("error", "unknown"))
+	else:
+		var hazards: Array = lattice.get_hazards()
+		if hazards.size() != 1 or (hazards[0].get("to_cell", []) as Array) != [1, 0, 0]:
+			_fail("exterior hazard endpoint was not preserved")
+	var unrelated: Dictionary = document.duplicate(true)
+	(unrelated["hazards"]["fire_zones"] as Array)[0]["to_cell"] = [2, 0, 0]
+	var rejected: Dictionary = lattice.hydrate_document(unrelated)
+	if not str(rejected.get("error", "")).contains("unoccupied cell"):
+		_fail("unrelated void hazard should be rejected")
+	lattice.free()
+	print("EXTERIOR_HAZARD_OK hydration preserves portal-aligned void endpoint")
+
+
+func _check_three_way_coalescence() -> void:
+	var Lattice := load("res://scripts/OccupancyLattice.gd")
+	var lattice = Lattice.new()
+	root.add_child(lattice)
+	lattice.active_role = "cargo"
+	if not lattice.paint_cell(Vector3i(0, 0, 0)):
+		_fail("paint first coalescence room")
+	lattice.create_room()
+	lattice.active_role = "bridge"
+	if not lattice.paint_cell(Vector3i(1, 0, 0)):
+		_fail("paint bridge coalescence room")
+	lattice.create_room()
+	lattice.active_role = "cargo"
+	if not lattice.paint_cell(Vector3i(2, 0, 0)):
+		_fail("paint later coalescence room")
+	var rooms: Array = lattice.get_rooms()
+	if rooms.size() != 3:
+		_fail("expected three rooms before role change, got %d" % rooms.size())
+	else:
+		var first_stable := str(rooms[0].get("stable_id", ""))
+		var bridge_id := int(rooms[1].get("id", 0))
+		var bridge_stable := str(rooms[1].get("stable_id", ""))
+		var later_stable := str(rooms[2].get("stable_id", ""))
+		lattice.select_room_id(bridge_id)
+		lattice.stamp_role("cargo")
+		if lattice.get_rooms().size() != 1:
+			_fail("three-way touching rooms did not reach a fixed point")
+		var remap: Dictionary = lattice.consume_room_stable_id_remap()
+		if str(remap.get(bridge_stable, "")) != first_stable or str(remap.get(later_stable, "")) != first_stable:
+			_fail("stable IDs did not remap to retained first room")
+	lattice.free()
+	print("COALESCE_OK three-way fixed point and stable remap")
 
 
 func _representative_document() -> Dictionary:

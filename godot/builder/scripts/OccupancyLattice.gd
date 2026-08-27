@@ -357,7 +357,7 @@ func _parse_hydrated_document(golden: Dictionary) -> Dictionary:
 		prop_ids[prop_id] = true
 		max_prop_id = maxi(max_prop_id, prop_id)
 
-	var hazards_result := _parse_hydrated_hazards(golden.get("hazards", {}), stable_ids, occupancy)
+	var hazards_result := _parse_hydrated_hazards(golden.get("hazards", {}), stable_ids, occupancy, portals_result["items"])
 	if hazards_result.has("error"):
 		return hazards_result
 	return {
@@ -406,7 +406,7 @@ func _parse_hydrated_links(value: Variant, room_ids: Dictionary, occupancy: Dict
 	return {"items": items}
 
 
-func _parse_hydrated_hazards(value: Variant, stable_ids: Dictionary, occupancy: Dictionary) -> Dictionary:
+func _parse_hydrated_hazards(value: Variant, stable_ids: Dictionary, occupancy: Dictionary, portals: Array[Dictionary]) -> Dictionary:
 	if not (value is Dictionary):
 		return {"error": "hazards must be an object"}
 	var source: Dictionary = value
@@ -431,8 +431,28 @@ func _parse_hydrated_hazards(value: Variant, stable_ids: Dictionary, occupancy: 
 				return {"error": "hazard ids must be non-empty and unique"}
 			if not stable_ids.has(from_room) or not stable_ids.has(to_room):
 				return {"error": "hazard %s references an unknown room" % zone_id}
-			if not occupancy.has(_key(from_cell)) or not occupancy.has(_key(to_cell)):
+			if not occupancy.has(_key(from_cell)):
 				return {"error": "hazard %s references an unoccupied cell" % zone_id}
+			if not occupancy.has(_key(to_cell)):
+				var exterior_portal := -1
+				for portal_idx in portals.size():
+					var portal: Dictionary = portals[portal_idx]
+					var portal_from := _xyz_cell(portal.get("from_cell", []))
+					var portal_to := _xyz_cell(portal.get("to_cell", []))
+					if not bool(portal.get("exterior", false)):
+						continue
+					if (portal_from == from_cell and portal_to == to_cell) or (portal_from == to_cell and portal_to == from_cell):
+						exterior_portal = portal_idx
+						break
+				if exterior_portal < 0:
+					return {"error": "hazard %s references an unoccupied cell" % zone_id}
+				var matched_portal: Dictionary = portals[exterior_portal]
+				var matched_from := _xyz_cell(matched_portal.get("from_cell", []))
+				var portal_from_id := int(matched_portal.get("from_room", 0))
+				if matched_from != from_cell or portal_from_id <= 0 or int(occupancy.get(_key(from_cell), 0)) != portal_from_id:
+					return {"error": "hazard %s does not align with its exterior portal" % zone_id}
+				if to_room != from_room:
+					return {"error": "hazard %s does not align with its exterior portal" % zone_id}
 			zone["kind"] = kind
 			items.append(zone)
 			seen[zone_id] = true
@@ -1431,21 +1451,28 @@ func _merge_room_into(keep: Dictionary, drop: Dictionary) -> void:
 
 func _coalesce_touching_same_role() -> void:
 	_room_stable_id_remap.clear()
-	var i := 0
-	while i < _rooms.size():
-		var room: Dictionary = _rooms[i]
-		var absorbed := false
-		var j := i + 1
-		while j < _rooms.size():
-			var other: Dictionary = _rooms[j]
-			if str(other.get("role", "")) == str(room.get("role", "")) and int(other.get("deck", -1)) == int(room.get("deck", -2)) and _rooms_share_cardinal(room, other):
+	# A merge can create a new touching edge through the absorbed room. Keep
+	# scanning until no pair changes so bridge rooms coalesce both earlier and
+	# later neighbors, while _merge_room_into preserves the first room's ID.
+	var changed := true
+	while changed:
+		changed = false
+		for i in _rooms.size():
+			var room: Dictionary = _rooms[i]
+			for j in range(i + 1, _rooms.size()):
+				var other: Dictionary = _rooms[j]
+				if str(other.get("role", "")) != str(room.get("role", "")):
+					continue
+				if int(other.get("deck", -1)) != int(room.get("deck", -2)):
+					continue
+				if not _rooms_share_cardinal(room, other):
+					continue
 				_merge_room_into(room, other)
 				_rooms.remove_at(j)
-				absorbed = true
-			else:
-				j += 1
-		if not absorbed:
-			i += 1
+				changed = true
+				break
+			if changed:
+				break
 
 
 func _room_accepts_cell(room: Dictionary, deck: int, xy: Vector2i) -> bool:
