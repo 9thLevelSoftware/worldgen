@@ -65,6 +65,8 @@ pub struct DerelictAuthor {
     extra_kits: Vec<BuilderKitCatalog>,
     #[init(val = BTreeMap::new())]
     sockets_by_kit: BTreeMap<String, SocketCatalog>,
+    #[init(val = BTreeSet::new())]
+    kit_definition_ids: BTreeSet<String>,
 }
 
 impl DerelictAuthor {
@@ -186,6 +188,7 @@ impl DerelictAuthor {
         let path = path.to_string();
         let mut errors: Vec<String> = Vec::new();
         let mut kits: Vec<BuilderKitCatalog> = Vec::new();
+        let mut kit_definition_ids: BTreeSet<String> = BTreeSet::new();
         let mut palettes = AuthorPalettes::offline().unwrap_or_default();
 
         if path.trim().is_empty() {
@@ -193,6 +196,7 @@ impl DerelictAuthor {
             self.data = Some(palettes);
             self.extra_kits = Vec::new();
             self.sockets_by_kit = BTreeMap::new();
+            self.kit_definition_ids = BTreeSet::new();
             return content_root_result(true, &[], item_count, &errors);
         }
 
@@ -203,6 +207,7 @@ impl DerelictAuthor {
                 self.data = Some(palettes);
                 self.extra_kits = Vec::new();
                 self.sockets_by_kit = BTreeMap::new();
+                self.kit_definition_ids = BTreeSet::new();
                 return content_root_result(false, &[], self.palettes_ref().items.len(), &errors);
             }
         };
@@ -211,6 +216,9 @@ impl DerelictAuthor {
             match read_under(&root, rel) {
                 Ok(text) => match BuilderKitCatalog::from_json(&text) {
                     Ok(kit) => {
+                        if !kit.kit_id.is_empty() {
+                            kit_definition_ids.insert(kit.kit_id.clone());
+                        }
                         if kit.kit_id == PRIMARY_KIT || palettes.kit.modules.is_empty() {
                             palettes.kit = kit.clone();
                         }
@@ -304,6 +312,7 @@ impl DerelictAuthor {
         let item_count = palettes.items.len();
         self.extra_kits = kits;
         self.sockets_by_kit = sockets_by_kit;
+        self.kit_definition_ids = kit_definition_ids;
         self.data = Some(palettes);
         content_root_result(errors.is_empty(), &kit_ids, item_count, &errors)
     }
@@ -404,6 +413,12 @@ impl DerelictAuthor {
                         "kit mismatch: export argument '{}' must match GoldenArea kit_id '{}'",
                         kit, golden.kit_id
                     );
+                    godot::global::godot_error!("DerelictAuthor.export_playable: {e}");
+                    return export_error_dict(&e);
+                }
+                if let Some(e) =
+                    missing_kit_definition_error(&self.kit_definition_ids, &golden.kit_id)
+                {
                     godot::global::godot_error!("DerelictAuthor.export_playable: {e}");
                     return export_error_dict(&e);
                 }
@@ -544,6 +559,16 @@ fn error_dict(msg: &str) -> VarDictionary {
     let mut d = VarDictionary::new();
     d.set("error", msg);
     d
+}
+
+fn missing_kit_definition_error(loaded_ids: &BTreeSet<String>, kit_id: &str) -> Option<String> {
+    if loaded_ids.contains(kit_id) {
+        return None;
+    }
+    Some(format!(
+        "kit definition '{}' is not loaded from the configured content root; load a content root containing its kit definition before playable export",
+        kit_id
+    ))
 }
 
 fn export_error_dict(msg: &str) -> VarDictionary {
@@ -1261,6 +1286,16 @@ mod tests {
         assert!(catalog_for_loaded(Some(&palettes), &catalogs, PRIMARY_KIT).is_none());
         assert!(picker_for_loaded(Some(&palettes), &catalogs, "missing_kit").is_err());
         assert!(catalog_for_loaded(Some(&palettes), &catalogs, "missing_kit").is_none());
+    }
+
+    #[test]
+    fn playable_export_requires_loaded_kit_definition() {
+        let loaded = BTreeSet::from(["ship_structural_industrial".to_string()]);
+        assert!(missing_kit_definition_error(&loaded, "ship_structural_industrial").is_none());
+        let error = missing_kit_definition_error(&loaded, "ship_structural_hazard")
+            .expect("missing kit definition must block playable export");
+        assert!(error.contains("ship_structural_hazard"));
+        assert!(error.contains("configured content root"));
     }
 
     #[test]
