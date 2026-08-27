@@ -195,7 +195,7 @@ func recovery_path() -> String:
 func has_recovery() -> bool:
 	return FileAccess.file_exists(recovery_path())
 
-func restore_recovery() -> Dictionary:
+func restore_recovery(before_commit: Callable = Callable()) -> Dictionary:
 	if not has_recovery():
 		return _error("No recovery snapshot available")
 	var file := FileAccess.open(recovery_path(), FileAccess.READ)
@@ -204,6 +204,11 @@ func restore_recovery() -> Dictionary:
 	var loaded := _canonicalize_text(file.get_as_text())
 	if loaded.is_empty() and not _last_error.is_empty():
 		return _error(_last_error)
+	# Hydrate the candidate before changing session state. A builder-specific
+	# rejection must leave the active document, history, and recovery file
+	# available for another attempt.
+	if before_commit.is_valid() and not bool(before_commit.call(loaded.duplicate(true))):
+		return _error("The recovery snapshot could not be hydrated by this builder.")
 	_undo_stack.clear()
 	_redo_stack.clear()
 	source_document = loaded

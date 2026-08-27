@@ -367,9 +367,9 @@ func _redo_document() -> void:
 
 
 func _restore_recovery() -> void:
-	var result: Dictionary = _session.restore_recovery()
+	var result: Dictionary = _session.restore_recovery(_apply_source_document)
 	if bool(result.get("ok", false)):
-		_apply_source_document(result.get("document", {}))
+		_recovery_dialog.hide()
 		_status.text = "Recovered unsaved work. Save it to keep the recovered document."
 
 
