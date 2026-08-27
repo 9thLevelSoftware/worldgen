@@ -106,6 +106,19 @@ func _check_exterior_hazard_hydration() -> void:
 	var rejected: Dictionary = lattice.hydrate_document(unrelated)
 	if not str(rejected.get("error", "")).contains("unoccupied cell"):
 		_fail("unrelated void hazard should be rejected")
+	var mismatched: Dictionary = document.duplicate(true)
+	(mismatched["hazards"]["fire_zones"] as Array)[0]["from_room"] = "wrong_room"
+	var mismatch_result: Dictionary = lattice.hydrate_document(mismatched)
+	if not str(mismatch_result.get("error", "")).contains("unknown room"):
+		_fail("unknown hazard room should be rejected")
+	else:
+		var owned_mismatch: Dictionary = document.duplicate(true)
+		(owned_mismatch["topology"]["rooms"] as Array).append({"id": 2, "stable_id": "other_room", "role": "cargo", "deck": 0, "cells": [[2, 0]]})
+		(owned_mismatch["hazards"]["fire_zones"] as Array)[0]["from_room"] = "other_room"
+		(owned_mismatch["hazards"]["fire_zones"] as Array)[0]["to_room"] = "other_room"
+		var owned_result: Dictionary = lattice.hydrate_document(owned_mismatch)
+		if not str(owned_result.get("error", "")).contains("from_room does not own"):
+			_fail("hazard with mismatched occupied from_cell should be rejected")
 	lattice.free()
 	print("EXTERIOR_HAZARD_OK hydration preserves portal-aligned void endpoint")
 

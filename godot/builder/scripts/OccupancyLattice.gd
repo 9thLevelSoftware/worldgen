@@ -146,6 +146,7 @@ var _has_pending := false
 var _pending_cell := Vector3i.ZERO
 var _asset_sel: Dictionary = {}
 var _room_stable_id_remap: Dictionary = {}
+var _prop_palette: Dictionary = {}
 
 var _camera: Camera3D
 var _pivot: Node3D
@@ -221,6 +222,12 @@ func hydrate_document(golden: Dictionary) -> Dictionary:
 	hazards_changed.emit()
 	room_selected.emit({})
 	return {"ok": true}
+
+
+## Supply the active author palette before opening a source document. Serialized
+## AuthoredProp records intentionally omit these transient placement rules.
+func set_prop_palette(palettes: Dictionary) -> void:
+	_prop_palette = palettes.duplicate(true)
 
 
 func _clear_document_state() -> void:
@@ -324,7 +331,7 @@ func _parse_hydrated_document(golden: Dictionary) -> Dictionary:
 			"cells": cells,
 		})
 		room_ids[room_id] = true
-		stable_ids[stable_id] = true
+		stable_ids[stable_id] = room_id
 		max_room_id = maxi(max_room_id, room_id)
 		max_deck = maxi(max_deck, deck)
 
@@ -353,6 +360,7 @@ func _parse_hydrated_document(golden: Dictionary) -> Dictionary:
 			return {"error": "prop %d is not on an occupied cell" % prop_id}
 		if str(prop.get("kind", "")).to_lower() == "door":
 			return {"error": "prop %d cannot use kind Door" % prop_id}
+		_hydrate_prop_constraints(prop, prop_cell, occupancy, rooms)
 		props.append(prop)
 		prop_ids[prop_id] = true
 		max_prop_id = maxi(max_prop_id, prop_id)
@@ -372,6 +380,41 @@ func _parse_hydrated_document(golden: Dictionary) -> Dictionary:
 		"next_hazard_serial": int(hazards_result["next_serial"]),
 		"deck_count": clampi(max_deck + 1, 1, MAX_DECKS),
 	}
+
+
+func _hydrate_prop_constraints(prop: Dictionary, cell: Vector3i, occupancy: Dictionary, rooms: Array[Dictionary]) -> void:
+	var proto := str(prop.get("proto", ""))
+	var visual_id := str(prop.get("visual_id", ""))
+	var room_role := ""
+	var room_id := int(occupancy.get(_key(cell), 0))
+	for room in rooms:
+		if int(room.get("id", 0)) == room_id:
+			room_role = str(room.get("role", ""))
+			break
+	var matched := false
+	for rec_v in _prop_palette.get("furnishing", []):
+		if not (rec_v is Dictionary):
+			continue
+		var rec: Dictionary = rec_v
+		if str(rec.get("proto", "")) != proto or (not room_role.is_empty() and str(rec.get("role", "")) != room_role):
+			continue
+		prop["wall_adjacent"] = _PALETTE.is_wall_adjacent(rec)
+		prop["allowed_yaw_deg"] = rec.get("allowed_yaw_deg", [])
+		matched = true
+		break
+	if matched:
+		return
+	for bucket in ["components", "dressing", "objectives"]:
+		for rec_v in _prop_palette.get(bucket, []):
+			if not (rec_v is Dictionary):
+				continue
+			var rec: Dictionary = rec_v
+			var rec_id := str(rec.get("id", rec.get("asset_id", "")))
+			if rec_id != visual_id and rec_id != proto:
+				continue
+			prop["wall_adjacent"] = _PALETTE.is_wall_adjacent(rec)
+			prop["allowed_yaw_deg"] = rec.get("allowed_yaw_deg", [])
+			return
 
 
 func _parse_hydrated_links(value: Variant, room_ids: Dictionary, occupancy: Dictionary, vertical: bool) -> Dictionary:
@@ -433,6 +476,8 @@ func _parse_hydrated_hazards(value: Variant, stable_ids: Dictionary, occupancy: 
 				return {"error": "hazard %s references an unknown room" % zone_id}
 			if not occupancy.has(_key(from_cell)):
 				return {"error": "hazard %s references an unoccupied cell" % zone_id}
+			if int(occupancy.get(_key(from_cell), 0)) != int(stable_ids.get(from_room, 0)):
+				return {"error": "hazard %s from_room does not own from_cell" % zone_id}
 			if not occupancy.has(_key(to_cell)):
 				var exterior_portal := -1
 				for portal_idx in portals.size():
@@ -453,6 +498,9 @@ func _parse_hydrated_hazards(value: Variant, stable_ids: Dictionary, occupancy: 
 					return {"error": "hazard %s does not align with its exterior portal" % zone_id}
 				if to_room != from_room:
 					return {"error": "hazard %s does not align with its exterior portal" % zone_id}
+			else:
+				if int(occupancy.get(_key(to_cell), 0)) != int(stable_ids.get(to_room, 0)):
+					return {"error": "hazard %s to_room does not own to_cell" % zone_id}
 			zone["kind"] = kind
 			items.append(zone)
 			seen[zone_id] = true

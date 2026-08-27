@@ -1340,10 +1340,12 @@ func _resolve_content() -> void:
 func _bind_palettes() -> void:
 	if author == null:
 		_palettes = {}
+		_lattice.set_prop_palette(_palettes)
 		_palette.bind_palettes({})
 		_inspector.bind_palettes({})
 		return
 	_palettes = author.palettes()
+	_lattice.set_prop_palette(_palettes)
 	_palette.bind_palettes(_palettes)
 	_inspector.bind_palettes(_palettes)
 

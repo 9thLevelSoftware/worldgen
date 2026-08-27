@@ -13,6 +13,7 @@ func _initialize() -> void:
 func _run_checks() -> void:
 	_check_palette()
 	_check_snap()
+	_check_hydrated_constraints()
 	_check_recompile_prunes_reserved_prop()
 	_check_shared_solid_facing()
 	_check_preview()
@@ -276,6 +277,36 @@ func _check_recompile_prunes_reserved_prop() -> void:
 	if not lattice.get_props().is_empty():
 		_fail("reserved prop survived topology recompile")
 	print("RECOMPILE_PROP_OK reserved prop reconciled")
+	lattice.queue_free()
+
+
+func _check_hydrated_constraints() -> void:
+	var Lattice := load("res://scripts/OccupancyLattice.gd")
+	var lattice = Lattice.new()
+	root.add_child(lattice)
+	lattice.set_prop_palette({
+		"furnishing": [{"role": "airlock", "proto": "suit_locker", "place": "WallAdjacent", "allowed_yaw_deg": [90.0]}],
+	})
+	var document := {
+		"topology": {"rooms": [{"id": 1, "stable_id": "airlock_01", "role": "airlock", "deck": 0, "cells": [[0, 0]]}], "portals": [], "verticals": []},
+		"props": [{"id": 1, "kind": "Container", "proto": "suit_locker", "visual_id": "locker", "cell": [0, 0, 0], "rotation": 0}],
+		"hazards": {"fire_zones": [], "breach_zones": [], "arc_zones": [], "radiation_zones": []},
+	}
+	var result: Dictionary = lattice.hydrate_document(document)
+	if not result.get("ok", false):
+		_fail("hydrated constraint document failed: %s" % result.get("error", "unknown"))
+	else:
+		lattice.set_compile_result({"airlock_01": {"reserved_cells": [], "wall_slots": [[0, 0, 0]], "center_slots": []}}, {}, true)
+		var prop: Dictionary = lattice.get_props()[0]
+		if lattice.try_place_prop(Vector3i(0, 0, 0)):
+			_fail("hydrated prop was not inspected")
+		lattice.cycle_prop_rotation(false)
+		if int(lattice.get_selected_prop().get("rotation", -1)) != 1:
+			_fail("hydrated allowed yaw was not restored")
+		lattice.set_compile_result({"airlock_01": {"reserved_cells": [], "wall_slots": [], "center_slots": [[0, 0, 0]]}}, {}, true)
+		if not lattice.get_props().is_empty():
+			_fail("hydrated wall-adjacent constraint was not restored")
+	print("HYDRATED_CONSTRAINTS_OK palette rules restored")
 	lattice.queue_free()
 
 
