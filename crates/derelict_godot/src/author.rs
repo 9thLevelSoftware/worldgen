@@ -94,11 +94,7 @@ impl DerelictAuthor {
         let mut ids: Vec<String> = catalog
             .modules
             .values()
-            .filter(|m| {
-                m.sockets
-                    .iter()
-                    .any(|s| s.kind == "floor_edge" || s.kind == "floor_top")
-            })
+            .filter(|m| has_complete_floor_sockets(m))
             .map(|m| m.module_id.clone())
             .collect();
         if ids.is_empty() {
@@ -136,6 +132,11 @@ impl DerelictAuthor {
             golden_ids: golden.room_stable_ids(),
         })
     }
+}
+
+fn has_complete_floor_sockets(module: &derelict_core::structural::sockets::ModuleContract) -> bool {
+    module.sockets.iter().any(|s| s.kind == "floor_edge")
+        && module.sockets.iter().any(|s| s.kind == "floor_top")
 }
 
 fn catalog_for_loaded<'a>(
@@ -1304,6 +1305,19 @@ mod tests {
         let mut catalogs = BTreeMap::new();
         let mut modules = BTreeMap::new();
         modules.insert(
+            "edge_only_floor".to_string(),
+            derelict_core::structural::sockets::ModuleContract {
+                module_id: "edge_only_floor".to_string(),
+                module_family: String::new(),
+                sockets: vec![derelict_core::structural::sockets::SocketDef {
+                    id: "edge".to_string(),
+                    kind: "floor_edge".to_string(),
+                    position_m: [0.0; 3],
+                    compatible_kinds: Vec::new(),
+                }],
+            },
+        );
+        modules.insert(
             "industrial_floor".to_string(),
             derelict_core::structural::sockets::ModuleContract {
                 module_id: "industrial_floor".to_string(),
@@ -1324,10 +1338,31 @@ mod tests {
                 ],
             },
         );
+        modules.insert(
+            "top_only_floor".to_string(),
+            derelict_core::structural::sockets::ModuleContract {
+                module_id: "top_only_floor".to_string(),
+                module_family: String::new(),
+                sockets: vec![derelict_core::structural::sockets::SocketDef {
+                    id: "top".to_string(),
+                    kind: "floor_top".to_string(),
+                    position_m: [0.0; 3],
+                    compatible_kinds: Vec::new(),
+                }],
+            },
+        );
         catalogs.insert(
             "ship_structural_industrial".to_string(),
             SocketCatalog { modules },
         );
+
+        let complete_floor_ids: Vec<_> = catalogs["ship_structural_industrial"]
+            .modules
+            .values()
+            .filter(|module| has_complete_floor_sockets(module))
+            .map(|module| module.module_id.as_str())
+            .collect();
+        assert_eq!(complete_floor_ids, vec!["industrial_floor"]);
 
         let catalog = catalog_for_loaded(Some(&palettes), &catalogs, "ship_structural_industrial")
             .expect("non-primary catalog should resolve");

@@ -441,10 +441,17 @@ pub struct PlayableExport {
 /// existing serializers with `stable_id` room names. Fail-closed.
 pub fn layout_from_golden(golden: &GoldenArea) -> Result<PlayableExport, String> {
     let default_kit = ExportOptions::default().kit_id;
-    if golden.kit_id != default_kit {
+    // Older GoldenArea documents omitted kit_id. Treat that legacy empty value
+    // as the default kit before applying the compatibility export check.
+    let resolved_kit = if golden.kit_id.is_empty() {
+        &default_kit
+    } else {
+        &golden.kit_id
+    };
+    if resolved_kit != &default_kit {
         return Err(format!(
 			"kit '{}' requires layout_from_golden_with_picker with its resolved catalog and floor allowlist",
-			golden.kit_id
+			resolved_kit
 		));
     }
     layout_from_golden_with_picker(golden, &DefaultModulePicker, None)

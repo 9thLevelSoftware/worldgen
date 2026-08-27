@@ -92,6 +92,18 @@ fn compatibility_export_rejects_unresolved_non_default_kit() {
 }
 
 #[test]
+fn compatibility_export_resolves_empty_kit_to_default() {
+    let mut golden = sample();
+    golden.kit_id.clear();
+
+    let docs = layout_from_golden(&golden).expect("legacy empty kit_id should use default kit");
+    assert_eq!(
+        docs.layout["kit_id"],
+        Value::String("ship_structural_v0".into())
+    );
+}
+
+#[test]
 fn stable_room_var_key_controls_atmosphere_and_numeric_key_remains_compatible() {
     let legacy = sample();
     let legacy_docs = layout_from_golden_with_picker(&legacy, &DefaultModulePicker, None)
