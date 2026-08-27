@@ -13,6 +13,7 @@ func _initialize() -> void:
 func _run_checks() -> void:
 	_check_palette()
 	_check_snap()
+	_check_recompile_prunes_reserved_prop()
 	_check_shared_solid_facing()
 	_check_preview()
 	_check_compile_airlock()
@@ -245,6 +246,36 @@ func _check_shared_solid_facing() -> void:
 		_fail("east cell west band should face west, got %s" % props[0].get("facing", ""))
 	else:
 		print("SHARED_SOLID_OK east cell west band facing=west")
+	lattice.queue_free()
+
+
+func _check_recompile_prunes_reserved_prop() -> void:
+	var Lattice := load("res://scripts/OccupancyLattice.gd")
+	var lattice = Lattice.new()
+	root.add_child(lattice)
+	lattice.active_role = "airlock"
+	lattice.paint_cell(Vector3i(0, 0, 0))
+	lattice.set_tool(Lattice.TOOL_PROP)
+	lattice.arm_prop({
+		"group": "furnishing", "role": "airlock", "proto": "suit_locker",
+		"kind": "Container", "place": "WallAdjacent", "visual_id": "generic_locker",
+		"wall_adjacent": true,
+	})
+	lattice.set_compile_result({
+		"airlock_01": {"reserved_cells": [], "wall_slots": [[0, 0, 0]], "center_slots": []},
+	}, {}, true)
+	if not lattice.try_place_prop(Vector3i(0, 0, 0)):
+		_fail("recompile prop setup failed")
+	if lattice.get_props().size() != 1:
+		_fail("recompile prop setup did not create a prop")
+	# A portal/vertical topology change can reserve the same cell in the fresh
+	# compile result. It must not survive as an exportable authored prop.
+	lattice.set_compile_result({
+		"airlock_01": {"reserved_cells": [[0, 0, 0]], "wall_slots": [], "center_slots": []},
+	}, {}, true)
+	if not lattice.get_props().is_empty():
+		_fail("reserved prop survived topology recompile")
+	print("RECOMPILE_PROP_OK reserved prop reconciled")
 	lattice.queue_free()
 
 

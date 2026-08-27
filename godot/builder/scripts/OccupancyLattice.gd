@@ -714,8 +714,14 @@ func set_compile_result(zones: Dictionary, plan: Dictionary, ok: bool) -> void:
 	_prop_ready = ok
 	_ingest_zones(zones)
 	_ingest_solids(plan)
+	# Topology edits (portals and verticals) recompile the slot catalog. Reconcile
+	# authored props against that fresh catalog before the preview/export path can
+	# consume them; props_changed lets the session record the removal visibly.
+	var pruned := _prune_props()
 	_sync_slots()
 	_refresh_ghost()
+	if pruned:
+		props_changed.emit()
 
 
 func try_place_prop(cell: Vector3i, hit: Vector3 = Vector3.ZERO) -> bool:
