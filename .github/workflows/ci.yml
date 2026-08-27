@@ -45,3 +45,28 @@ jobs:
         run: cargo run -p derelict_cli -- --sweep 5 --archetype frigate
       - name: Author golden validate
         run: cargo run -p derelict_cli -- --author-validate crates/derelict_core/assets/golden_areas/airlock_2x2.json
+
+  builder:
+    name: Builder headless checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout world generator
+        uses: actions/checkout@v4
+        with:
+          path: world_gen
+      - name: Checkout Synaptic Sea content
+        uses: actions/checkout@v4
+        with:
+          repository: 9thLevelSoftware/the-synaptic-sea
+          path: the-synaptic-sea
+      - uses: chickensoft-games/setup-godot@v2
+        with:
+          version: 4.6.2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: world_gen
+      - name: Build and run builder checks
+        working-directory: world_gen
+        shell: pwsh
+        run: ./scripts/test_builder.ps1 -SynapticSeaRoot ../the-synaptic-sea

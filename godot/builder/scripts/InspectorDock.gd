@@ -121,7 +121,7 @@ func _ready() -> void:
 	add_child(title)
 
 	_empty = Label.new()
-	_empty.text = "Room list: inspect only. Paint: occupied click stamps+selects (re-click inspects). Portal: click A then a cardinal neighbor. Vertical: stacked occupied cells on N and N±1. Props: snap to compiled wall/center slots after compile OK. Assign module: click a compiled floor, wall, or portal. Hazards: click two cells or a portal edge (re-click inspects). Delete removes the selected portal, vertical, prop, or hazard."
+	_empty.text = "Nothing selected. Use the Workspace checklist to choose a stage, then select an authored room, connection, prop, gameplay marker, or compiled module. The persistent guidance below the canvas shows the current tool, next action, and pending endpoint. Occupied cells are inspected; existing room roles change only through the room inspector."
 	_empty.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	add_child(_empty)
 

@@ -42,7 +42,16 @@ cargo run -p derelict_cli -- --author-export crates/derelict_core/assets/golden_
 # 4. Build the extension and open the Godot project
 powershell -File scripts\build_windows.ps1
 # then open godot/project.godot in the Godot editor and press F5
+
+# 5. Run every standalone builder headless check
+powershell -File scripts\test_builder.ps1 -SynapticSeaRoot ..\the-synaptic-sea
 ```
+
+`test_builder.ps1` resolves Godot from `-GodotPath`, `GODOT_PATH`, or `PATH`,
+builds and installs the builder GDExtension, then fails fast across the guided
+workspace, hazards, module picker, prop palette, and structural preview checks.
+Use `-SkipBuild` only when an open local Godot editor already holds the current
+builder DLL; CI always performs a clean build.
 
 The generate path also accepts `--out <path>` for a top-down PNG, `--deck <n>`
 or `--all-decks`, `--sweep <count>`, and `--bench`. `--archetype` accepts the

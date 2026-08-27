@@ -21,7 +21,9 @@ use derelict_core::structural::validate::{
 };
 use derelict_core::topology::room_path;
 use derelict_core::Role;
-use godot::builtin::{Array, GString, PackedStringArray, VarArray, VarDictionary, Variant, VariantType};
+use godot::builtin::{
+    Array, GString, PackedStringArray, VarArray, VarDictionary, Variant, VariantType,
+};
 use godot::classes::RefCounted;
 use godot::meta::ToGodot;
 use godot::obj::Base;

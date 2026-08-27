@@ -14,7 +14,7 @@ window/size/viewport_height=900
 window/size/mode=2
 window/size/initial_position_type=0
 window/size/initial_position=Vector2i(40, 40)
-window/stretch/mode="disabled"
+window/stretch/mode="canvas_items"
 
 [rendering]
 

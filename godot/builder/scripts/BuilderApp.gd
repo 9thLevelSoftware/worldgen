@@ -5,6 +5,14 @@ extends Control
 
 const _LATTICE := preload("res://scripts/OccupancyLattice.gd")
 const COMPILE_DEBOUNCE_S := 0.05
+const STAGE_GEOMETRY := 0
+const STAGE_CONNECTIONS := 1
+const STAGE_PROPS_ASSETS := 2
+const STAGE_GAMEPLAY := 3
+const STAGE_VALIDATE_RUN := 4
+const STAGE_TITLES: PackedStringArray = [
+	"Geometry", "Connections", "Props & Assets", "Gameplay", "Validate & Run",
+]
 
 var author
 var golden: Dictionary = {}
@@ -27,6 +35,9 @@ var _export_dialog: FileDialog
 @onready var _banner: PanelContainer = %Banner
 @onready var _banner_label: Label = %BannerLabel
 @onready var _phase_bar: TabBar = %PhaseBar
+@onready var _stage_checklist: ItemList = %StageChecklist
+@onready var _stage_blocker: PanelContainer = %StageBlocker
+@onready var _stage_blocker_label: Label = %StageBlockerLabel
 @onready var _deck_label: Label = %DeckLabel
 @onready var _iso_btn: Button = %IsoBtn
 @onready var _export_btn: Button = %ExportBtn
@@ -49,6 +60,10 @@ var _hazard_list: VBoxContainer
 @onready var _inspector = %InspectorDock
 @onready var _issues: ItemList = %IssuesList
 @onready var _status: Label = %StatusLabel
+@onready var _current_tool_label: Label = %CurrentToolLabel
+@onready var _next_action_label: Label = %NextActionLabel
+@onready var _pending_endpoint_label: Label = %PendingEndpointLabel
+@onready var _dirty_label: Label = %DirtyLabel
 @onready var _content = %ContentRoot
 @onready var _root_label: Label = %RootLabel
 
@@ -58,6 +73,7 @@ func _ready() -> void:
 	_build_tools()
 	_build_roles()
 	_wire()
+	_configure_document_actions()
 	golden = _empty_golden()
 	if ClassDB.class_exists("DerelictAuthor"):
 		author = ClassDB.instantiate("DerelictAuthor")
@@ -66,7 +82,8 @@ func _ready() -> void:
 	_sync_deck_label()
 	_refresh_phases()
 	_apply_phase(0)
-	_status.text = "Paint LMB · RMB erase · Role is the brush (inspector changes a laid room) · Portal: click A then neighbor · Vertical: stacked N/N±1 · Del removes selected · Esc cancels pending · Q/E deck"
+	_status.text = "Hover: move over the canvas for valid and blocked placement feedback."
+	_update_persistent_guidance()
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -121,7 +138,8 @@ func _wire() -> void:
 	_lattice.hazards_changed.connect(_on_hazards_changed)
 	_lattice.tool_changed.connect(_on_tool_changed)
 	_lattice.deck_changed.connect(_on_deck_changed)
-	_lattice.hover_info.connect(func(t: String) -> void: _status.text = t)
+	_lattice.hover_info.connect(_on_hover_info)
+	_lattice.pending_changed.connect(func(_active: bool, _cell: Vector3i) -> void: _update_persistent_guidance())
 	_inspector.room_edited.connect(_on_room_edited)
 	_inspector.portal_edited.connect(_on_portal_edited)
 	_inspector.portal_removed.connect(func() -> void: _lattice.remove_selected_portal())
@@ -134,7 +152,9 @@ func _wire() -> void:
 	_inspector.hazard_removed.connect(func() -> void: _lattice.remove_selected_hazard())
 	_palette.prop_armed.connect(func(e: Dictionary) -> void: _lattice.arm_prop(e))
 	_phase_bar.tab_changed.connect(_on_phase_tab)
+	_stage_checklist.item_selected.connect(_on_stage_selected)
 	_room_list.item_selected.connect(_on_room_list_selected)
+	_issues.item_selected.connect(_on_problem_selected)
 	_compile_timer = Timer.new()
 	_compile_timer.one_shot = true
 	_compile_timer.wait_time = COMPILE_DEBOUNCE_S
@@ -142,79 +162,102 @@ func _wire() -> void:
 	add_child(_compile_timer)
 
 
+func _configure_document_actions() -> void:
+	_dirty_label.text = "Saved · %s" % _display_name
+	for button_name in ["NewBtn", "OpenBtn", "SaveBtn", "SaveAsBtn", "UndoBtn", "RedoBtn"]:
+		var button := get_node_or_null("%%%s" % button_name) as Button
+		if button == null:
+			continue
+		button.disabled = true
+		button.tooltip_text = "Document lifecycle, recovery, and undo/redo arrive in milestone 3."
+	%RunGameBtn.disabled = true
+	%RunGameBtn.tooltip_text = "The Synaptic Sea preview runner is not connected yet. Validate/export remain available."
+
+
 func _build_phases() -> void:
-	_phase_bar.add_tab("1 Floor plan")
-	_phase_bar.add_tab("2 Props")
-	_phase_bar.add_tab("3 Assets")
-	_phase_bar.add_tab("4 Hazards")
-	_phase_bar.set_tab_disabled(1, true)
-	_phase_bar.set_tab_disabled(2, true)
-	_phase_bar.set_tab_disabled(3, false)
+	for title in STAGE_TITLES:
+		_phase_bar.add_tab(title)
 	_phase_bar.current_tab = 0
+	_refresh_stage_checklist()
 
 
 func _on_phase_tab(idx: int) -> void:
-	if idx == 1 and not _compile_ok:
-		_phase_bar.current_tab = 0
+	if idx < 0 or idx >= STAGE_TITLES.size():
 		return
-	if idx == 2:
-		if _lattice.get_rooms().is_empty():
-			_phase_bar.current_tab = 0
-			return
-		_apply_phase(idx)
+	_stage_checklist.select(idx)
+	_apply_phase(idx)
+
+
+func _on_stage_selected(idx: int) -> void:
+	if idx < 0 or idx >= STAGE_TITLES.size():
 		return
+	_phase_bar.set_block_signals(true)
+	_phase_bar.current_tab = idx
+	_phase_bar.set_block_signals(false)
 	_apply_phase(idx)
 
 
 func _apply_phase(idx: int) -> void:
-	var props_phase: bool = idx == 1 and _compile_ok
-	var assets_phase: bool = idx == 2
-	var hazard_phase: bool = idx == 3
+	var geometry_phase: bool = idx == STAGE_GEOMETRY
+	var connections_phase: bool = idx == STAGE_CONNECTIONS
+	var props_phase: bool = idx == STAGE_PROPS_ASSETS
+	var hazard_phase: bool = idx == STAGE_GAMEPLAY
+	var blocked: bool = not _stage_prerequisite(idx).is_empty()
 	_palette.visible = props_phase
-	_tools_title.visible = not props_phase
-	_tool_list.visible = not props_phase and not hazard_phase
-	_state_title.visible = not props_phase and not hazard_phase
-	_state_list.visible = not props_phase and not hazard_phase
-	_role_title.visible = not props_phase and not hazard_phase
-	_role_scroll.visible = not props_phase and not hazard_phase
-	_new_room_btn.visible = not props_phase and not hazard_phase
+	_tools_title.visible = geometry_phase or connections_phase or props_phase
+	_tool_list.visible = geometry_phase or connections_phase or props_phase
+	_state_title.visible = connections_phase
+	_state_list.visible = connections_phase
+	_role_title.visible = geometry_phase
+	_role_scroll.visible = geometry_phase
+	_new_room_btn.visible = geometry_phase
 	if _hazard_title:
 		_hazard_title.visible = hazard_phase
 	if _hazard_list:
 		_hazard_list.visible = hazard_phase
-	_lattice.set_slot_overlay_visible(props_phase)
-	if props_phase:
+	_sync_tool_shelf(idx, blocked)
+	_lattice.set_slot_overlay_visible(props_phase and not blocked)
+	if blocked:
+		_status.text = "Blocked stage selected. Follow the prerequisite shown in the workspace checklist."
+	elif props_phase:
 		if _lattice.active_tool != _LATTICE.TOOL_PROP:
 			_lattice.set_tool(_LATTICE.TOOL_PROP)
 		var room: Dictionary = _lattice.get_selected()
 		_palette.set_role_filter(str(room.get("role", "")))
-		_status.text = "Props: LMB place/select · RMB delete · R rotate · Del remove · reserved (door/vertical) blocked"
-	elif assets_phase:
-		if _lattice.active_tool != _LATTICE.TOOL_ASSET:
-			_lattice.set_tool(_LATTICE.TOOL_ASSET)
-		_status.text = "Assign module: click compiled floor/wall/portal · Del removes selected portal/vertical · Esc cancels pending · Q/E deck"
+		_status.text = "Hover: compiled slots show valid and blocked prop placement."
 	elif hazard_phase:
 		if _lattice.active_tool != _LATTICE.TOOL_HAZARD:
 			_lattice.set_tool(_LATTICE.TOOL_HAZARD)
 		_highlight_armed_hazard()
-		_status.text = "Hazards: LMB two cells or a portal edge · re-click inspects · RMB/Del remove · preview markers only, no live ignite"
-	else:
-		if _lattice.active_tool == _LATTICE.TOOL_PROP or _lattice.active_tool == _LATTICE.TOOL_ASSET or _lattice.active_tool == _LATTICE.TOOL_HAZARD:
+		_status.text = "Hover: gameplay markers are authoring previews; runtime acceptance is still pending."
+	elif geometry_phase:
+		if _lattice.active_tool != _LATTICE.TOOL_PAINT:
 			_lattice.set_tool(_LATTICE.TOOL_PAINT)
-		_status.text = "Paint LMB · RMB erase · Role is the brush (inspector changes a laid room) · Portal: click A then neighbor · Vertical: stacked N/N±1 · Del removes selected · Q/E deck"
+		_status.text = "Hover: green feedback is valid paint; blocked feedback explains why."
+	elif connections_phase:
+		if _lattice.active_tool != _LATTICE.TOOL_PORTAL and _lattice.active_tool != _LATTICE.TOOL_VERTICAL:
+			_lattice.set_tool(_LATTICE.TOOL_PORTAL)
+		_status.text = "Hover: select a first endpoint, then a highlighted legal target."
+	else:
+		_status.text = "Review validation problems and export readiness. Runtime launch is not connected yet."
 	_sync_preview_layers()
+	_refresh_stage_checklist()
+	_update_persistent_guidance()
 
 
 func _build_tools() -> void:
 	var tools := [
-		["Paint occupancy", _LATTICE.TOOL_PAINT],
-		["Portal / exit", _LATTICE.TOOL_PORTAL],
-		["Vertical opening", _LATTICE.TOOL_VERTICAL],
-		["Assign module", _LATTICE.TOOL_ASSET],
+		["Paint rooms", _LATTICE.TOOL_PAINT, STAGE_GEOMETRY],
+		["Portal / exterior exit", _LATTICE.TOOL_PORTAL, STAGE_CONNECTIONS],
+		["Vertical opening", _LATTICE.TOOL_VERTICAL, STAGE_CONNECTIONS],
+		["Place selected prop", _LATTICE.TOOL_PROP, STAGE_PROPS_ASSETS],
+		["Inspect / assign module", _LATTICE.TOOL_ASSET, STAGE_PROPS_ASSETS],
 	]
 	for spec in tools:
 		var b := Button.new()
 		b.text = str(spec[0])
+		b.set_meta("tool", str(spec[1]))
+		b.set_meta("stage", int(spec[2]))
 		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		b.pressed.connect(_on_tool_pressed.bind(str(spec[1])))
 		_tool_list.add_child(b)
@@ -229,6 +272,24 @@ func _build_tools() -> void:
 	_build_hazard_kinds()
 
 
+func _sync_tool_shelf(stage: int, blocked: bool) -> void:
+	for child in _tool_list.get_children():
+		var button := child as Button
+		if button == null:
+			continue
+		button.visible = int(button.get_meta("stage", -1)) == stage
+		button.disabled = blocked
+	for child in _state_list.get_children():
+		if child is Button:
+			(child as Button).disabled = blocked
+	if _hazard_list:
+		for child in _hazard_list.get_children():
+			if child is Button:
+				(child as Button).disabled = blocked
+	_palette.mouse_filter = Control.MOUSE_FILTER_IGNORE if blocked else Control.MOUSE_FILTER_PASS
+	_palette.modulate = Color(0.62, 0.62, 0.66) if blocked else Color.WHITE
+
+
 func _on_tool_pressed(tool: String) -> void:
 	_lattice.set_tool(tool)
 	_highlight_armed_tool()
@@ -241,20 +302,11 @@ func _on_portal_state_pressed(state: String) -> void:
 
 func _highlight_armed_tool() -> void:
 	var armed := str(_lattice.active_tool)
-	var labels := {
-		_LATTICE.TOOL_PAINT: "Paint occupancy",
-		_LATTICE.TOOL_PORTAL: "Portal / exit",
-		_LATTICE.TOOL_VERTICAL: "Vertical opening",
-		_LATTICE.TOOL_PROP: "Place prop",
-		_LATTICE.TOOL_ASSET: "Assign module",
-		_LATTICE.TOOL_HAZARD: "Hazard zone",
-	}
-	var want := str(labels.get(armed, "Paint occupancy"))
 	for child in _tool_list.get_children():
 		var b := child as Button
 		if b == null:
 			continue
-		b.modulate = Color(1.15, 1.1, 0.65) if b.text == want else Color.WHITE
+		b.modulate = Color(1.15, 1.1, 0.65) if str(b.get_meta("tool", "")) == armed else Color.WHITE
 
 
 func _highlight_armed_state() -> void:
@@ -709,37 +761,12 @@ func _on_module_override_set(ov_map: String, key: String, module_id: String) -> 
 
 func _on_tool_changed(_t: String) -> void:
 	_highlight_armed_tool()
-	if _lattice.active_tool == _LATTICE.TOOL_ASSET:
-		if _phase_bar.current_tab != 2 and not _phase_bar.is_tab_disabled(2):
-			_phase_bar.set_block_signals(true)
-			_phase_bar.current_tab = 2
-			_phase_bar.set_block_signals(false)
-			_apply_phase(2)
-	elif _lattice.active_tool == _LATTICE.TOOL_PROP:
-		if _phase_bar.current_tab != 1 and not _phase_bar.is_tab_disabled(1):
-			_phase_bar.set_block_signals(true)
-			_phase_bar.current_tab = 1
-			_phase_bar.set_block_signals(false)
-			_apply_phase(1)
-	elif _lattice.active_tool == _LATTICE.TOOL_HAZARD:
-		if _phase_bar.current_tab != 3 and not _phase_bar.is_tab_disabled(3):
-			_phase_bar.set_block_signals(true)
-			_phase_bar.current_tab = 3
-			_phase_bar.set_block_signals(false)
-			_apply_phase(3)
-	elif _phase_bar.current_tab == 2 or _phase_bar.current_tab == 1 or _phase_bar.current_tab == 3:
-		_phase_bar.set_block_signals(true)
-		_phase_bar.current_tab = 0
-		_phase_bar.set_block_signals(false)
-		_apply_phase(0)
+	_update_persistent_guidance()
 
 
 func _refresh_phases() -> void:
-	var has_occ: bool = not _lattice.get_rooms().is_empty()
-	_phase_bar.set_tab_disabled(2, not has_occ)
-	if not has_occ and _phase_bar.current_tab == 2:
-		_phase_bar.current_tab = 0
-		_apply_phase(0)
+	_refresh_stage_checklist()
+	_update_persistent_guidance()
 
 
 func _on_portal_edited(portal: Dictionary) -> void:
@@ -835,6 +862,16 @@ func _schedule_compile() -> void:
 
 
 func _run_compile() -> void:
+	if _lattice.get_rooms().is_empty():
+		_show_empty_document_state()
+		_preview.apply_plan({})
+		_preview.apply_props([], _palettes)
+		_preview.apply_hazards([])
+		_lattice.set_compile_result({}, {}, false)
+		_last_plan = {}
+		_sync_preview_layers()
+		_set_phase2_ready(false)
+		return
 	if author == null:
 		_show_issues([{"code": "Extension", "detail": "DerelictAuthor missing. Run scripts/build_windows.ps1 -Builder."}], [])
 		_preview.apply_plan({})
@@ -875,7 +912,7 @@ func _run_compile() -> void:
 	_preview.apply_hazards(_lattice.get_hazards())
 	_sync_preview_layers()
 	if issues.is_empty() and stale.is_empty() and _issues.item_count > 0:
-		_issues.set_item_text(0, "Compile OK · %s" % _preview.status_text())
+		_issues.set_item_text(0, "Ready · Validation passed · %s" % _preview.status_text())
 	else:
 		_issues.add_item(_preview.status_text())
 	_apply_preview_banner()
@@ -900,31 +937,167 @@ func _sync_preview_layers() -> void:
 
 func _set_phase2_ready(ok: bool) -> void:
 	_compile_ok = ok
-	_phase_bar.set_tab_disabled(1, not ok)
-	if not ok and _phase_bar.current_tab == 1:
-		_phase_bar.current_tab = 0
-		_apply_phase(0)
-	elif ok and _phase_bar.current_tab == 1:
+	if ok and _phase_bar.current_tab == STAGE_PROPS_ASSETS:
 		_lattice.set_slot_overlay_visible(true)
+	_refresh_stage_checklist()
+	_update_persistent_guidance()
+
+
+func _show_empty_document_state() -> void:
+	_issues.clear()
+	var index := _issues.add_item("Info · Start with Geometry: choose a room role, then paint the first cell.")
+	_issues.set_item_metadata(index, {"severity": "info", "target_type": "stage", "target_id": "geometry"})
+
+
+func _stage_prerequisite(stage: int) -> String:
+	var has_rooms: bool = not _lattice.get_rooms().is_empty()
+	match stage:
+		STAGE_CONNECTIONS:
+			if not has_rooms:
+				return "Paint at least one room in Geometry before adding connections."
+		STAGE_PROPS_ASSETS:
+			if not has_rooms:
+				return "Paint at least one room in Geometry before placing props or assigning assets."
+			if not _compile_ok:
+				return "Resolve the Problems panel until structural validation succeeds."
+		STAGE_GAMEPLAY:
+			if not has_rooms:
+				return "Paint at least one room in Geometry before adding gameplay markers."
+		STAGE_VALIDATE_RUN:
+			if not has_rooms:
+				return "Paint at least one room in Geometry before validation or export."
+			if not _compile_ok:
+				return "Resolve every validation error before export; Run in Game is not connected yet."
+	return ""
+
+
+func _stage_status(stage: int) -> String:
+	var prerequisite := _stage_prerequisite(stage)
+	if not prerequisite.is_empty():
+		return "[BLOCKED]"
+	match stage:
+		STAGE_GEOMETRY:
+			return "[READY]" if _lattice.get_rooms().is_empty() else "[DONE]"
+		STAGE_VALIDATE_RUN:
+			return "[WARNING]"
+		_:
+			return "[WARNING]"
+
+
+func _refresh_stage_checklist() -> void:
+	if _stage_checklist == null:
+		return
+	var selected := _phase_bar.current_tab if _phase_bar != null else STAGE_GEOMETRY
+	_stage_checklist.clear()
+	for i in STAGE_TITLES.size():
+		var index := _stage_checklist.add_item("%s %d. %s" % [_stage_status(i), i + 1, STAGE_TITLES[i]])
+		_stage_checklist.set_item_metadata(index, {"stage": i, "prerequisite": _stage_prerequisite(i)})
+	if selected >= 0 and selected < _stage_checklist.item_count:
+		_stage_checklist.select(selected)
+	var blocker := _stage_prerequisite(selected)
+	_stage_blocker.visible = true
+	if blocker.is_empty():
+		if selected == STAGE_VALIDATE_RUN:
+			_stage_blocker_label.text = "Warning: export can be validated here; Run in Game remains blocked until runtime acceptance exists."
+		elif selected == STAGE_GAMEPLAY:
+			_stage_blocker_label.text = "Warning: authored gameplay is preview-only until each behavior passes an in-game acceptance test."
+		else:
+			_stage_blocker_label.text = "Ready: %s tools are available." % STAGE_TITLES[selected]
+	else:
+		_stage_blocker_label.text = "Blocked: %s" % blocker
+
+
+func _tool_name(tool: String) -> String:
+	return str({
+		_LATTICE.TOOL_PAINT: "Paint rooms",
+		_LATTICE.TOOL_PORTAL: "Portal / exterior exit",
+		_LATTICE.TOOL_VERTICAL: "Vertical opening",
+		_LATTICE.TOOL_PROP: "Place selected prop",
+		_LATTICE.TOOL_ASSET: "Inspect / assign module",
+		_LATTICE.TOOL_HAZARD: "Gameplay hazard marker",
+	}.get(tool, "None"))
+
+
+func _update_persistent_guidance() -> void:
+	if _current_tool_label == null:
+		return
+	var stage := _phase_bar.current_tab
+	var blocker := _stage_prerequisite(stage)
+	_current_tool_label.text = "Current tool: %s" % _tool_name(str(_lattice.active_tool))
+	if not blocker.is_empty():
+		_next_action_label.text = "Next action: %s" % blocker
+	elif _lattice.has_pending_click():
+		_next_action_label.text = "Next action: choose a highlighted legal endpoint, or press Esc to cancel."
+	else:
+		match stage:
+			STAGE_GEOMETRY:
+				_next_action_label.text = "Next action: choose a room role, then paint or inspect a cell."
+			STAGE_CONNECTIONS:
+				_next_action_label.text = "Next action: choose Portal or Vertical, then select the first endpoint."
+			STAGE_PROPS_ASSETS:
+				_next_action_label.text = "Next action: select a prop or inspect a compiled module in the canvas."
+			STAGE_GAMEPLAY:
+				_next_action_label.text = "Next action: author a preview marker and review its runtime warning."
+			_:
+				_next_action_label.text = "Next action: resolve Problems, then export the validated bundle."
+	if _lattice.has_pending_click():
+		var cell: Vector3i = _lattice.pending_cell()
+		_pending_endpoint_label.text = "Endpoint: (%d, %d) on deck %d selected" % [cell.x, cell.y, cell.z]
+	else:
+		_pending_endpoint_label.text = "Endpoint: none selected"
+
+
+func _on_hover_info(text: String) -> void:
+	_status.text = "Hover: %s" % text
+	_update_persistent_guidance()
+
+
+func _on_problem_selected(index: int) -> void:
+	if index < 0 or index >= _issues.item_count:
+		return
+	var meta: Variant = _issues.get_item_metadata(index)
+	if meta is Dictionary:
+		var problem: Dictionary = meta
+		if problem.has("deck"):
+			_lattice.set_active_deck(int(problem["deck"]))
+		var target := str(problem.get("target_id", problem.get("id", "")))
+		_status.text = "Problem focus: %s" % (target if not target.is_empty() else _issues.get_item_text(index))
+	else:
+		_status.text = "Problem: %s" % _issues.get_item_text(index)
 
 
 func _show_issues(issues: Array, stale: Array = []) -> void:
 	_issues.clear()
 	if issues.is_empty() and stale.is_empty():
-		_issues.add_item("Compile OK")
+		var ok_index := _issues.add_item("Ready · Validation passed")
+		_issues.set_item_metadata(ok_index, {"severity": "info"})
 		return
 	for iss in issues:
 		if iss is Dictionary:
-			_issues.add_item("%s: %s" % [iss.get("code", "?"), iss.get("detail", "")])
+			var problem: Dictionary = (iss as Dictionary).duplicate(true)
+			var severity := str(problem.get("severity", _problem_severity(str(problem.get("code", "")))))
+			problem["severity"] = severity
+			var message := str(problem.get("message", problem.get("detail", "")))
+			var index := _issues.add_item("%s · %s: %s" % [severity.capitalize(), problem.get("code", "?"), message])
+			_issues.set_item_metadata(index, problem)
 		else:
 			_issues.add_item(str(iss))
 	for s in stale:
 		if s is Dictionary:
-			_issues.add_item("stale_override: %s %s → %s" % [
+			var index := _issues.add_item("Warning · stale_override: %s %s → %s" % [
 				s.get("class", "?"), s.get("key", ""), s.get("module_id", "")
 			])
+			var stale_problem: Dictionary = (s as Dictionary).duplicate(true)
+			stale_problem["severity"] = "warning"
+			_issues.set_item_metadata(index, stale_problem)
 		else:
 			_issues.add_item(str(s))
+
+
+func _problem_severity(code: String) -> String:
+	if code in ["FloorBadModule", "ReachabilityBroken", "OccupancyMalformed", "Compile", "Extension"]:
+		return "error"
+	return "warning"
 
 
 func _apply_preview_banner() -> void:

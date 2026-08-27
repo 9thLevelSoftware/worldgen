@@ -16,6 +16,7 @@ signal hazards_changed
 signal deck_changed(deck: int)
 signal hover_info(text: String)
 signal tool_changed(tool: String)
+signal pending_changed(active: bool, cell: Vector3i)
 
 const _PALETTE := preload("res://scripts/PaletteDock.gd")
 
@@ -366,13 +367,17 @@ func cancel_pointer() -> void:
 	_panning = false
 	_orbiting = false
 	_paint_drag = false
-	_has_pending = false
+	_cancel_pending()
 	_has_last_screen = false
 	hide_ghost()
 
 
 func has_pending_click() -> bool:
 	return _has_pending
+
+
+func pending_cell() -> Vector3i:
+	return _pending_cell
 
 
 ## Arm a new room; the RoomSpec is created on the next successful void paint.
@@ -1930,6 +1935,7 @@ func _cancel_pending() -> void:
 	_has_pending = false
 	_pending_cell = Vector3i.ZERO
 	_sync_pending_anchor()
+	pending_changed.emit(false, _pending_cell)
 
 
 ## First click of a two-click tool. Drops portal/vertical/hazard inspect so the
@@ -1948,6 +1954,7 @@ func _begin_pending(cell: Vector3i) -> void:
 	_sync_pending_anchor()
 	_sync_floors()
 	_sync_links()
+	pending_changed.emit(true, _pending_cell)
 	room_selected.emit(get_selected())
 
 
