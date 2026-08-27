@@ -1462,12 +1462,13 @@ func _try_paint(cell: Vector3i) -> bool:
 	_coalesce_touching_same_role()
 	room = get_selected()
 	_prune_links()
+	var hz_remapped := _refresh_hazard_rooms()
 	var hz_pruned := _prune_hazards()
 	_sync_deck_count()
 	_sync_floors()
 	_sync_links()
 	occupancy_changed.emit()
-	if hz_pruned:
+	if hz_remapped or hz_pruned:
 		hazards_changed.emit()
 	room_selected.emit(room)
 	return true

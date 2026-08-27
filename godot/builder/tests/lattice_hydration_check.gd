@@ -28,6 +28,7 @@ func _run_checks() -> void:
 	_check_vertical_endpoint_reuse_rejected()
 	_check_center_prop_reconciled_after_compile()
 	_check_three_way_coalescence()
+	_check_bridge_coalescence_preserves_absorbed_hazard()
 
 	lattice.free()
 	_finish()
@@ -169,6 +170,47 @@ func _check_three_way_coalescence() -> void:
 			_fail("stable IDs did not remap to retained first room")
 	lattice.free()
 	print("COALESCE_OK three-way fixed point and stable remap")
+
+
+func _check_bridge_coalescence_preserves_absorbed_hazard() -> void:
+	var Lattice := load("res://scripts/OccupancyLattice.gd")
+	var lattice = Lattice.new()
+	root.add_child(lattice)
+	var document := {
+		"topology": {
+			"rooms": [
+				{"id": 1, "stable_id": "cargo_left", "role": "cargo", "deck": 0, "cells": [[0, 0]]},
+				{"id": 2, "stable_id": "cargo_right", "role": "cargo", "deck": 0, "cells": [[2, 0]]},
+			],
+			"portals": [], "verticals": [],
+		},
+		"props": [],
+		"hazards": {
+			"source": "authored",
+			"fire_zones": [{
+				"id": "fire_bridge",
+				"from_room": "cargo_right", "to_room": "cargo_right",
+				"from_cell": [2, 0, 0], "to_cell": [2, 0, 0],
+			}],
+			"breach_zones": [], "arc_zones": [], "radiation_zones": [],
+		},
+	}
+	var result: Dictionary = lattice.hydrate_document(document)
+	if not result.get("ok", false):
+		_fail("bridge hazard fixture failed to hydrate: %s" % result.get("error", "unknown"))
+	else:
+		lattice.active_role = "cargo"
+		if not lattice.paint_cell(Vector3i(1, 0, 0)):
+			_fail("painting bridge cell failed")
+		var hazards: Array = lattice.get_hazards()
+		if hazards.size() != 1:
+			_fail("painting bridge cell coalesced away absorbed-room hazard; expected 1, got %d" % hazards.size())
+		else:
+			var hazard: Dictionary = hazards[0]
+			if str(hazard.get("from_room", "")) != "cargo_left" or str(hazard.get("to_room", "")) != "cargo_left":
+				_fail("absorbed-room hazard room IDs were not remapped to retained cargo_left")
+	lattice.free()
+	print("COALESCE_HAZARD_OK absorbed bridge hazard survives stable-ID remap")
 
 
 func _check_duplicate_prop_cell_rejected() -> void:
