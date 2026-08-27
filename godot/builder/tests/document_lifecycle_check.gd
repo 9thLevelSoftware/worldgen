@@ -51,6 +51,30 @@ func _run_checks() -> void:
 	if lattice.get_rooms().size() != 1 or str(lattice.get_rooms()[0].get("stable_id", "")) != "airlock_01":
 		_fail("open did not fully hydrate the saved source")
 
+	# An edit that the builder cannot safely rehydrate must never remain visible
+	# while the session silently keeps its older clean document. The builder rolls the
+	# lattice back to the last complete source snapshot and does not create dirty
+	# history that Save could misrepresent as the rejected edit.
+	var duplicate_id_doc: Dictionary = app._empty_golden()
+	duplicate_id_doc["topology"]["rooms"] = [
+		{"id": 1, "stable_id": "cargo_01", "role": "cargo", "deck": 0, "cells": [[0, 0]]},
+		{"id": 2, "stable_id": "bridge_02", "role": "bridge", "deck": 0, "cells": [[3, 0]]},
+	]
+	app._session.start_new(duplicate_id_doc)
+	if not app._apply_source_document(duplicate_id_doc):
+		_fail("invalid-edit rollback fixture failed to hydrate")
+	var prior_valid_source: Dictionary = app._session.source_document.duplicate(true)
+	lattice.apply_room_edit({"id": 2, "stable_id": "cargo_01", "role": "bridge"})
+	var rolled_back_rooms: Array = lattice.get_rooms()
+	if rolled_back_rooms.size() != 2 \
+			or str(rolled_back_rooms[0].get("stable_id", "")) != "cargo_01" \
+			or str(rolled_back_rooms[1].get("stable_id", "")) != "bridge_02":
+		_fail("rejected lattice edit remained visible instead of rolling back")
+	if app._session.has_unsaved_changes() or app._session.source_document != prior_valid_source:
+		_fail("rejected lattice edit changed or dirtied the session source")
+	print("INVALID_EDIT_ROLLBACK_OK visible and session source stay aligned")
+	app._open_document(SOURCE_PATH)
+
 	# A Rust-readable source can still be outside the builder lattice bounds.
 	# Reject it before the session adopts its path, history, or save target.
 	var prior_path: String = app._session.source_path

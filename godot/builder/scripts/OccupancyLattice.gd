@@ -347,6 +347,7 @@ func _parse_hydrated_document(golden: Dictionary) -> Dictionary:
 		return {"error": "props must be an array"}
 	var props: Array[Dictionary] = []
 	var prop_ids: Dictionary = {}
+	var prop_cells: Dictionary = {}
 	var max_prop_id := 0
 	for prop_v in props_v:
 		if not (prop_v is Dictionary):
@@ -358,11 +359,15 @@ func _parse_hydrated_document(golden: Dictionary) -> Dictionary:
 			return {"error": "prop id %d must be positive and unique" % prop_id}
 		if not occupancy.has(_key(prop_cell)):
 			return {"error": "prop %d is not on an occupied cell" % prop_id}
+		var prop_cell_key := _key(prop_cell)
+		if prop_cells.has(prop_cell_key):
+			return {"error": "prop %d shares occupied cell with prop %d; one prop per cell" % [prop_id, prop_cells[prop_cell_key]]}
 		if str(prop.get("kind", "")).to_lower() == "door":
 			return {"error": "prop %d cannot use kind Door" % prop_id}
 		_hydrate_prop_constraints(prop, prop_cell, occupancy, rooms)
 		props.append(prop)
 		prop_ids[prop_id] = true
+		prop_cells[prop_cell_key] = prop_id
 		max_prop_id = maxi(max_prop_id, prop_id)
 
 	var hazards_result := _parse_hydrated_hazards(golden.get("hazards", {}), stable_ids, occupancy, portals_result["items"])
@@ -380,6 +385,16 @@ func _parse_hydrated_document(golden: Dictionary) -> Dictionary:
 		"next_hazard_serial": int(hazards_result["next_serial"]),
 		"deck_count": clampi(max_deck + 1, 1, MAX_DECKS),
 	}
+
+
+## Read-only document check used before the app adopts visible lattice edits
+## into its session history. It deliberately shares the exact parser used by
+## hydration so interactive edits cannot create a state that reopen would reject.
+func validate_hydration_document(golden: Dictionary) -> Dictionary:
+	var parsed: Dictionary = _parse_hydrated_document(golden)
+	if parsed.has("error"):
+		return {"ok": false, "error": str(parsed.get("error", "Invalid lattice document"))}
+	return {"ok": true}
 
 
 func _hydrate_prop_constraints(prop: Dictionary, cell: Vector3i, occupancy: Dictionary, rooms: Array[Dictionary]) -> void:

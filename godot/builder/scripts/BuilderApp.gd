@@ -317,7 +317,9 @@ func _on_unsaved_action(action: StringName) -> void:
 	if _session.source_path.is_empty():
 		_show_save_as()
 		return
-	_commit_session_document("Save before continuing")
+	if not _commit_session_document("Save before continuing"):
+		_cancel_deferred_destructive_action()
+		return
 	var result: Dictionary = _session.save_document()
 	if bool(result.get("ok", false)):
 		_continue_destructive_action()
@@ -343,7 +345,8 @@ func _open_document(path: String) -> void:
 
 
 func _save_document() -> void:
-	_commit_session_document("Save")
+	if not _commit_session_document("Save"):
+		return
 	if _session.source_path.is_empty():
 		_show_save_as()
 		return
@@ -359,7 +362,9 @@ func _show_save_as() -> void:
 
 
 func _save_document_as(path: String) -> void:
-	_commit_session_document("Save As")
+	if not _commit_session_document("Save As"):
+		_cancel_deferred_destructive_action()
+		return
 	if not path.to_lower().ends_with(".json"):
 		path += ".json"
 	var result: Dictionary = _session.save_document_as(path)
@@ -658,7 +663,8 @@ func _on_export_pressed() -> void:
 	if author == null:
 		_status.text = "export failed: DerelictAuthor missing"
 		return
-	_commit_session_document("Validate for export")
+	if not _commit_session_document("Validate for export"):
+		return
 	if not _compile_ok or _session == null or not _session.validation_matches_current():
 		_status.text = "export blocked: run a successful validation for the current source"
 		_show_issues([{"code": "StaleValidation", "severity": "error", "message": "The source changed after its last successful validation."}], [])
@@ -685,7 +691,8 @@ func _confirm_bundle_overwrite() -> void:
 
 
 func _on_run_game_pressed() -> void:
-	_commit_session_document("Validate for runtime preview")
+	if not _commit_session_document("Validate for runtime preview"):
+		return
 	if not _compile_ok or _session == null or not _session.validation_matches_current():
 		_preview_failure("StaleValidation", "Run in Game requires a successful validation for the current source.")
 		return
@@ -1697,11 +1704,45 @@ func _ensure_vars(id: int) -> Dictionary:
 	return _room_vars[k]
 
 
-func _commit_session_document(label: String) -> void:
+func _commit_session_document(label: String) -> bool:
 	if _hydrating_document or _session == null or author == null:
-		return
+		return _hydrating_document
 	golden = _golden_from_lattice()
-	_session.commit_document(golden, label)
+	var lattice_check: Dictionary = _lattice.validate_hydration_document(golden)
+	if not bool(lattice_check.get("ok", false)):
+		return _restore_session_source_after_rejected_edit(str(lattice_check.get(
+			"error", "The visible lattice is not a valid source document.")))
+	# Canonicalize before adopting the visible lattice. `commit_document()` uses
+	# false for both no-op and rejection, so preflight here lets the UI distinguish
+	# an unchanged valid document from an invalid edit. Rejected edits are rolled
+	# back immediately to the session's last complete source snapshot.
+	var canonical_text := str(author.save_golden(golden))
+	if canonical_text.is_empty() and not golden.is_empty():
+		return _restore_session_source_after_rejected_edit(
+			"DerelictAuthor rejected the edited source document.")
+	var canonical: Variant = author.load_golden(canonical_text)
+	if not (canonical is Dictionary) or (canonical as Dictionary).has("error"):
+		return _restore_session_source_after_rejected_edit(
+			str((canonical as Dictionary).get("error", "Invalid GoldenArea")) \
+			if canonical is Dictionary else "Invalid GoldenArea")
+	var committed: bool = _session.commit_document(golden, label)
+	if not committed and _session.source_document != (canonical as Dictionary):
+		return _restore_session_source_after_rejected_edit(
+			"The edited source could not be adopted by the document session.")
+	return true
+
+
+func _restore_session_source_after_rejected_edit(message: String) -> bool:
+	var prior: Dictionary = _session.source_document.duplicate(true)
+	var restored: bool = _apply_source_document(prior)
+	_status.text = "Edit rejected: source document restored." if restored \
+		else "Edit rejected and the prior source could not be restored."
+	_show_issues([{
+		"code": "InvalidEdit",
+		"severity": "error",
+		"message": message,
+	}], [])
+	return false
 
 
 func _apply_source_document(document: Dictionary) -> bool:

@@ -23,6 +23,7 @@ func _run_checks() -> void:
 		_check_hydrated(lattice)
 		_check_reset(lattice)
 	_check_exterior_hazard_hydration()
+	_check_duplicate_prop_cell_rejected()
 	_check_three_way_coalescence()
 
 	lattice.free()
@@ -155,6 +156,22 @@ func _check_three_way_coalescence() -> void:
 			_fail("stable IDs did not remap to retained first room")
 	lattice.free()
 	print("COALESCE_OK three-way fixed point and stable remap")
+
+
+func _check_duplicate_prop_cell_rejected() -> void:
+	var Lattice := load("res://scripts/OccupancyLattice.gd")
+	var lattice = Lattice.new()
+	root.add_child(lattice)
+	var duplicate := _representative_document()
+	(duplicate["props"] as Array).append({
+		"id": 10, "kind": "Container", "proto": "crate", "visual_id": "crate_a",
+		"cell": [0, 0, 0], "rotation": 0,
+	})
+	var result: Dictionary = lattice.hydrate_document(duplicate)
+	if not str(result.get("error", "")).contains("one prop per cell"):
+		_fail("hydration accepted multiple props on one occupied cell: %s" % result.get("error", "success"))
+	lattice.free()
+	print("DUPLICATE_PROP_CELL_OK hydration enforces one prop per cell")
 
 
 func _representative_document() -> Dictionary:
