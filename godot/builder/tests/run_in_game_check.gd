@@ -60,6 +60,21 @@ func _run_checks() -> void:
 		rooms[0] = preview_room
 		topology["rooms"] = rooms
 		document["topology"] = topology
+		# Keep the fixture's explicit-inventory prop in the runtime acceptance,
+		# but adapt its furnishing identity to the room role alongside the room.
+		# Hydration intentionally rejects the original airlock-only suit_locker in
+		# a bridge, just as interactive placement would.
+		var props: Array = document.get("props", [])
+		if props.is_empty() or not (props[0] is Dictionary):
+			_fail("fixture has no prop to adapt for runtime acceptance")
+			await _cleanup_app()
+			_finish()
+			return
+		var preview_prop: Dictionary = props[0]
+		preview_prop["proto"] = "bridge_locker"
+		preview_prop["visual_id"] = "generic_locker"
+		props[0] = preview_prop
+		document["props"] = props
 		var zone_base := {
 			"from_room": "airlock_01", "to_room": "airlock_01",
 			"from_cell": [0, 0, 0], "to_cell": [1, 0, 0],

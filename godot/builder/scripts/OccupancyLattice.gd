@@ -364,6 +364,8 @@ func _parse_hydrated_document(golden: Dictionary) -> Dictionary:
 			return {"error": "prop %d shares occupied cell with prop %d; one prop per cell" % [prop_id, prop_cells[prop_cell_key]]}
 		if str(prop.get("kind", "")).to_lower() == "door":
 			return {"error": "prop %d cannot use kind Door" % prop_id}
+		if not _prop_role_compatible(prop, prop_cell, occupancy, rooms):
+			return {"error": "prop %d proto '%s' is incompatible with owning room role" % [prop_id, str(prop.get("proto", ""))]}
 		_hydrate_prop_constraints(prop, prop_cell, occupancy, rooms)
 		props.append(prop)
 		prop_ids[prop_id] = true
@@ -413,6 +415,7 @@ func _hydrate_prop_constraints(prop: Dictionary, cell: Vector3i, occupancy: Dict
 		var rec: Dictionary = rec_v
 		if str(rec.get("proto", "")) != proto or (not room_role.is_empty() and str(rec.get("role", "")) != room_role):
 			continue
+		prop["role"] = str(rec.get("role", ""))
 		prop["wall_adjacent"] = _PALETTE.is_wall_adjacent(rec)
 		prop["place"] = _prop_place(rec)
 		prop["allowed_yaw_deg"] = rec.get("allowed_yaw_deg", [])
@@ -434,6 +437,28 @@ func _hydrate_prop_constraints(prop: Dictionary, cell: Vector3i, occupancy: Dict
 			return
 
 
+func _prop_role_compatible(prop: Dictionary, cell: Vector3i, occupancy: Dictionary, rooms: Array[Dictionary]) -> bool:
+	var proto := str(prop.get("proto", ""))
+	var room_id := int(occupancy.get(_key(cell), 0))
+	var room_role := ""
+	for room in rooms:
+		if int(room.get("id", 0)) == room_id:
+			room_role = str(room.get("role", ""))
+			break
+	var saw_furnishing := false
+	for rec_v in _prop_palette.get("furnishing", []):
+		if not (rec_v is Dictionary):
+			continue
+		var rec: Dictionary = rec_v
+		if str(rec.get("proto", "")) != proto:
+			continue
+		saw_furnishing = true
+		var required_role := str(rec.get("role", ""))
+		if required_role.is_empty() or required_role == room_role:
+			return true
+	return not saw_furnishing
+
+
 func _prop_place(entry: Dictionary) -> String:
 	var place := str(entry.get("place", ""))
 	if not place.is_empty():
@@ -451,6 +476,8 @@ func _parse_hydrated_links(value: Variant, room_ids: Dictionary, occupancy: Dict
 	if not (value is Array):
 		return {"error": "%s must be an array" % ("topology.verticals" if vertical else "topology.portals")}
 	var items: Array[Dictionary] = []
+	var vertical_pairs: Dictionary = {}
+	var vertical_endpoints: Dictionary = {}
 	for item_v in value:
 		if not (item_v is Dictionary):
 			return {"error": "connection entries must be objects"}
@@ -469,6 +496,16 @@ func _parse_hydrated_links(value: Variant, room_ids: Dictionary, occupancy: Dict
 		if vertical:
 			if from_cell.x != to_cell.x or from_cell.y != to_cell.y or absi(from_cell.z - to_cell.z) != 1:
 				return {"error": "vertical endpoints must be stacked on adjacent decks"}
+			var from_key := _key(from_cell)
+			var to_key := _key(to_cell)
+			var pair_key := "%s|%s" % [from_key if from_key < to_key else to_key, to_key if from_key < to_key else from_key]
+			if vertical_pairs.has(pair_key):
+				return {"error": "duplicate vertical endpoints %s" % pair_key}
+			if vertical_endpoints.has(from_key) or vertical_endpoints.has(to_key):
+				return {"error": "vertical endpoint is already used by another vertical"}
+			vertical_pairs[pair_key] = true
+			vertical_endpoints[from_key] = true
+			vertical_endpoints[to_key] = true
 		else:
 			var state := str(item.get("state", ""))
 			if PORTAL_STATES.find(state) < 0:
@@ -1066,7 +1103,10 @@ func stamp_role(role: String) -> void:
 		room["role"] = role
 		_coalesce_touching_same_role()
 		_prune_links()
+		var props_pruned := _prune_props()
 		room = get_selected()
+		if props_pruned:
+			props_changed.emit()
 	var hz_changed := _refresh_hazard_rooms()
 	_sync_floors()
 	_sync_links()
@@ -1086,10 +1126,12 @@ func apply_room_edit(edited: Dictionary) -> void:
 		if not sid.is_empty():
 			r["stable_id"] = sid
 		var role := str(edited.get("role", ""))
+		var props_pruned := false
 		if not role.is_empty():
 			r["role"] = role
 			_coalesce_touching_same_role()
 			_prune_links()
+			props_pruned = _prune_props()
 			r = get_selected()
 		var hz_changed := _refresh_hazard_rooms()
 		_sync_floors()
@@ -1097,6 +1139,8 @@ func apply_room_edit(edited: Dictionary) -> void:
 		occupancy_changed.emit()
 		if hz_changed:
 			hazards_changed.emit()
+		if props_pruned:
+			props_changed.emit()
 		room_selected.emit(r)
 		return
 
@@ -3218,6 +3262,7 @@ func _place_prop(cell: Vector3i, entry: Dictionary) -> void:
 		"albedo": str(entry.get("albedo", "")),
 		"place": str(entry.get("place", "")),
 		"group": str(entry.get("group", "")),
+		"role": str(entry.get("role", "")),
 		"allowed_yaw_deg": entry.get("allowed_yaw_deg", []),
 	}
 	_next_prop_id += 1
@@ -3453,6 +3498,8 @@ func _prune_props() -> bool:
 			if _room_has_center_slots(room_id) and not _center_slots.has(key):
 				drop = true
 		elif _prop_ready and not _wall_slots.has(key) and not _center_slots.has(key):
+			drop = true
+		elif not _prop_role_compatible(p, cell, _occupancy, _rooms):
 			drop = true
 		if drop:
 			changed = true

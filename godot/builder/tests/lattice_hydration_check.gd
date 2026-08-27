@@ -24,6 +24,8 @@ func _run_checks() -> void:
 		_check_reset(lattice)
 	_check_exterior_hazard_hydration()
 	_check_duplicate_prop_cell_rejected()
+	_check_incompatible_furnishing_rejected()
+	_check_vertical_endpoint_reuse_rejected()
 	_check_center_prop_reconciled_after_compile()
 	_check_three_way_coalescence()
 
@@ -183,6 +185,73 @@ func _check_duplicate_prop_cell_rejected() -> void:
 		_fail("hydration accepted multiple props on one occupied cell: %s" % result.get("error", "success"))
 	lattice.free()
 	print("DUPLICATE_PROP_CELL_OK hydration enforces one prop per cell")
+
+
+func _check_incompatible_furnishing_rejected() -> void:
+	var Lattice := load("res://scripts/OccupancyLattice.gd")
+	var lattice = Lattice.new()
+	root.add_child(lattice)
+	lattice.set_prop_palette({"furnishing": [{
+		"role": "airlock", "proto": "suit_locker", "kind": "Container",
+		"place": "WallAdjacent",
+	}]})
+	var document := {
+		"topology": {"rooms": [{"id": 1, "stable_id": "cargo_01", "role": "cargo", "deck": 0, "cells": [[0, 0]]}], "portals": [], "verticals": []},
+		"props": [{"id": 1, "kind": "Container", "proto": "suit_locker", "visual_id": "", "cell": [0, 0, 0], "rotation": 0}],
+		"hazards": {"fire_zones": [], "breach_zones": [], "arc_zones": [], "radiation_zones": []},
+	}
+	var result: Dictionary = lattice.hydrate_document(document)
+	if not str(result.get("error", "")).contains("incompatible with owning room role"):
+		_fail("hydration accepted furnishing for an incompatible room role: %s" % result.get("error", "success"))
+	var compatible := document.duplicate(true)
+	(compatible["topology"]["rooms"] as Array)[0]["role"] = "airlock"
+	var compatible_result: Dictionary = lattice.hydrate_document(compatible)
+	if not compatible_result.get("ok", false):
+		_fail("hydration rejected furnishing with its palette room role")
+	else:
+		lattice.select_room_id(1)
+		lattice.stamp_role("cargo")
+		if not lattice.get_props().is_empty():
+			_fail("role edit left an incompatible furnishing in the document")
+	lattice.free()
+	print("FURNISHING_ROLE_OK hydration rejects and role edits prune incompatible palette role")
+
+
+func _check_vertical_endpoint_reuse_rejected() -> void:
+	var Lattice := load("res://scripts/OccupancyLattice.gd")
+	var lattice = Lattice.new()
+	root.add_child(lattice)
+	var document := {
+		"topology": {
+			"rooms": [
+				{"id": 1, "stable_id": "lower_a", "role": "airlock", "deck": 0, "cells": [[0, 0]]},
+				{"id": 2, "stable_id": "upper_a", "role": "airlock", "deck": 1, "cells": [[0, 0]]},
+				{"id": 3, "stable_id": "lower_b", "role": "cargo", "deck": 0, "cells": [[1, 0]]},
+				{"id": 4, "stable_id": "upper_b", "role": "cargo", "deck": 1, "cells": [[1, 0]]},
+			],
+			"portals": [],
+			"verticals": [
+				{"from_room": 1, "to_room": 2, "from_cell": [0, 0, 0], "to_cell": [0, 0, 1]},
+				{"from_room": 1, "to_room": 2, "from_cell": [0, 0, 0], "to_cell": [0, 0, 1]},
+			],
+		},
+		"props": [],
+		"hazards": {"fire_zones": [], "breach_zones": [], "arc_zones": [], "radiation_zones": []},
+	}
+	var result: Dictionary = lattice.hydrate_document(document)
+	if not str(result.get("error", "")).contains("duplicate vertical endpoints"):
+		_fail("hydration accepted duplicate vertical rows: %s" % result.get("error", "success"))
+	var shared := document.duplicate(true)
+	(shared["topology"]["rooms"] as Array).append({"id": 5, "stable_id": "upper_c", "role": "cargo", "deck": 2, "cells": [[0, 0]]})
+	(shared["topology"]["verticals"] as Array)[1]["from_cell"] = [0, 0, 1]
+	(shared["topology"]["verticals"] as Array)[1]["to_cell"] = [0, 0, 2]
+	(shared["topology"]["verticals"] as Array)[1]["from_room"] = 2
+	(shared["topology"]["verticals"] as Array)[1]["to_room"] = 5
+	var shared_result: Dictionary = lattice.hydrate_document(shared)
+	if not str(shared_result.get("error", "")).contains("endpoint is already used"):
+		_fail("hydration accepted a vertical sharing an endpoint: %s" % shared_result.get("error", "success"))
+	lattice.free()
+	print("VERTICAL_ENDPOINT_OK hydration rejects duplicate and shared endpoints")
 
 
 func _check_center_prop_reconciled_after_compile() -> void:

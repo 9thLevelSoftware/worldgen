@@ -153,36 +153,50 @@ fn plan_modules_missing_from_kit_definition(
     defined_modules: &BTreeSet<String>,
 ) -> Vec<String> {
     let mut referenced = BTreeSet::new();
-    referenced.extend(
-        plan.occupancy.values().filter_map(|record| {
-            (!record.module_id.is_empty()).then_some(record.module_id.as_str())
-        }),
+    add_non_empty_module_ids(
+        &mut referenced,
+        plan.occupancy
+            .values()
+            .map(|record| record.module_id.as_str()),
     );
-    referenced.extend(
-        plan.edges.values().filter_map(|record| {
-            (!record.module_id.is_empty()).then_some(record.module_id.as_str())
-        }),
+    add_non_empty_module_ids(
+        &mut referenced,
+        plan.edges.values().map(|record| record.module_id.as_str()),
     );
-    referenced.extend(
-        plan.placements.iter().filter_map(|record| {
-            (!record.module_id.is_empty()).then_some(record.module_id.as_str())
-        }),
+    add_non_empty_module_ids(
+        &mut referenced,
+        plan.placements
+            .iter()
+            .map(|record| record.module_id.as_str()),
     );
-    referenced.extend(
-        plan.floor_placements.iter().filter_map(|record| {
-            (!record.module_id.is_empty()).then_some(record.module_id.as_str())
-        }),
+    add_non_empty_module_ids(
+        &mut referenced,
+        plan.floor_placements
+            .iter()
+            .map(|record| record.module_id.as_str()),
     );
-    referenced.extend(
-        plan.ceiling_placements.iter().filter_map(|record| {
-            (!record.module_id.is_empty()).then_some(record.module_id.as_str())
-        }),
+    add_non_empty_module_ids(
+        &mut referenced,
+        plan.ceiling_placements
+            .iter()
+            .map(|record| record.module_id.as_str()),
     );
     referenced
         .into_iter()
         .filter(|module_id| !defined_modules.contains(*module_id))
         .map(str::to_string)
         .collect()
+}
+
+fn add_non_empty_module_ids<'a, I>(referenced: &mut BTreeSet<&'a str>, module_ids: I)
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    referenced.extend(
+        module_ids
+            .into_iter()
+            .filter(|module_id| !module_id.is_empty()),
+    );
 }
 
 /// GoldenArea documents created before kits were persisted have an empty
