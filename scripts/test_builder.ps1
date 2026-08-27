@@ -103,6 +103,12 @@ Write-Host "SYNAPTIC_SEA_ROOT: $env:SYNAPTIC_SEA_ROOT"
 
 if (-not $SkipBuild) { Install-Extension }
 
+Write-Host "Importing builder project..."
+& $godot --headless --editor --path $builderRoot --quit
+if ($LASTEXITCODE -ne 0) {
+    throw "Godot builder project import failed (exit $LASTEXITCODE)."
+}
+
 $checks = @(
     "guided_workspace_check.gd",
     "builder_session_check.gd",
