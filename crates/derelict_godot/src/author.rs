@@ -566,7 +566,7 @@ fn missing_kit_definition_error(loaded_ids: &BTreeSet<String>, kit_id: &str) -> 
         return None;
     }
     Some(format!(
-        "kit definition '{}' is not loaded from the configured content root; load a content root containing its kit definition before playable export",
+        "kit definition '{}' is unavailable for playable export; configure a content root containing its kit definition",
         kit_id
     ))
 }
@@ -1295,7 +1295,7 @@ mod tests {
         let error = missing_kit_definition_error(&loaded, "ship_structural_hazard")
             .expect("missing kit definition must block playable export");
         assert!(error.contains("ship_structural_hazard"));
-        assert!(error.contains("configured content root"));
+        assert!(error.contains("configure a content root"));
     }
 
     #[test]
