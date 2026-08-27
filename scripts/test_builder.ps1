@@ -16,6 +16,20 @@ $ErrorActionPreference = "Stop"
 $root = (Split-Path $PSScriptRoot -Parent)
 $builderRoot = Join-Path $root (Join-Path "godot" "builder")
 
+# PowerShell 7 exposes $IsWindows/$IsMacOS, but Windows PowerShell 5.1 does
+# not. Initialize explicit flags once so platform selection works in both.
+$platformIsWindows = $false
+$platformIsMacOS = $false
+$isWindowsVariable = Get-Variable -Name IsWindows -ErrorAction SilentlyContinue
+$isMacOSVariable = Get-Variable -Name IsMacOS -ErrorAction SilentlyContinue
+if ($null -ne $isWindowsVariable) { $platformIsWindows = [bool]$isWindowsVariable.Value }
+if ($null -ne $isMacOSVariable) { $platformIsMacOS = [bool]$isMacOSVariable.Value }
+if (-not $platformIsWindows -and -not $platformIsMacOS) {
+    $platformId = [System.Environment]::OSVersion.Platform
+    $platformIsWindows = $platformId -eq [System.PlatformID]::Win32NT
+    $platformIsMacOS = $platformId -eq [System.PlatformID]::MacOSX -or $env:OSTYPE -like "darwin*"
+}
+
 function Resolve-Godot {
     param([string]$Requested)
 
@@ -28,12 +42,12 @@ function Resolve-Godot {
     $command = Get-Command godot4 -ErrorAction SilentlyContinue
     if ($null -ne $command) { $candidates += $command.Source }
 
-    if ($IsWindows) {
+    if ($platformIsWindows) {
         $candidates += @(
             "$env:ProgramFiles\Godot\Godot.exe",
             "$env:LOCALAPPDATA\Godot\Godot.exe"
         )
-    } elseif ($IsMacOS) {
+    } elseif ($platformIsMacOS) {
         $candidates += "/Applications/Godot.app/Contents/MacOS/Godot"
     } else {
         $candidates += @("/usr/bin/godot4", "/usr/bin/godot")
@@ -71,10 +85,10 @@ function Install-Extension {
         & cargo build --release -p derelict_godot
         if ($LASTEXITCODE -ne 0) { throw "cargo build --release -p derelict_godot failed (exit $LASTEXITCODE)." }
 
-        if ($IsWindows) {
+        if ($platformIsWindows) {
             $artifact = Join-Path $root (Join-Path (Join-Path "target" "release") "derelict_godot.dll")
             $platform = "win64"
-        } elseif ($IsMacOS) {
+        } elseif ($platformIsMacOS) {
             $artifact = Join-Path $root (Join-Path (Join-Path "target" "release") "libderelict_godot.dylib")
             $platform = "macos"
         } else {
