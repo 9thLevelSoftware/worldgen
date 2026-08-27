@@ -340,9 +340,16 @@ impl GoldenArea {
             ));
         }
         let mut prop_ids = BTreeSet::new();
+        let mut prop_cells = BTreeMap::new();
         for prop in &self.props {
             if !prop_ids.insert(prop.id) {
                 return Err(format!("duplicate prop id {}", prop.id));
+            }
+            if let Some(previous_id) = prop_cells.insert(prop.cell, prop.id) {
+                return Err(format!(
+                    "props {} and {} share cell {:?}",
+                    previous_id, prop.id, prop.cell
+                ));
             }
             if prop.kind == EntityKind::Door {
                 return Err(format!(

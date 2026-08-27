@@ -43,10 +43,27 @@ func _run_checks() -> void:
 	if document.is_empty():
 		_fail("fixture could not be loaded by DerelictAuthor")
 	else:
+		# The committed fixture is an airlock, which the builder deliberately marks
+		# as preview-only for fire because it has no live hull compartment. Exercise
+		# Run in Game with a supported bridge room so the authored fire must ignite
+		# in the production compartment model instead of asserting an unsupported
+		# visual-only overlay is runtime-ready.
+		var topology: Dictionary = document.get("topology", {})
+		var rooms: Array = topology.get("rooms", [])
+		if rooms.is_empty() or not (rooms[0] is Dictionary):
+			_fail("fixture has no room to adapt for runtime acceptance")
+			await _cleanup_app()
+			_finish()
+			return
+		var preview_room: Dictionary = rooms[0]
+		preview_room["role"] = "bridge"
+		rooms[0] = preview_room
+		topology["rooms"] = rooms
+		document["topology"] = topology
 		var zone_base := {
 			"from_room": "airlock_01", "to_room": "airlock_01",
 			"from_cell": [0, 0, 0], "to_cell": [1, 0, 0],
-			"module_id": "", "compartment_id": "airlock", "rationale": "runtime preview acceptance",
+			"module_id": "", "compartment_id": "bridge", "rationale": "runtime preview acceptance",
 		}
 		var hazards: Dictionary = document.get("hazards", {})
 		for hazard in [

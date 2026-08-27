@@ -105,3 +105,19 @@ fn duplicate_authored_prop_ids_are_rejected_before_export_projection() {
     let err = layout_from_golden(&golden).expect_err("duplicate prop IDs must fail export");
     assert!(err.contains("duplicate prop id"), "unexpected error: {err}");
 }
+
+#[test]
+fn distinct_authored_props_sharing_a_cell_are_rejected_before_export() {
+    let mut golden = sample();
+    let mut duplicate_cell = golden.props[0].clone();
+    duplicate_cell.id = 7;
+    golden.props.push(duplicate_cell);
+
+    let err =
+        layout_from_golden(&golden).expect_err("distinct props sharing a cell must fail export");
+    assert!(
+        err.contains("share cell"),
+        "unexpected overlapping-prop error: {err}"
+    );
+    assert!(err.contains("1") && err.contains("7"));
+}

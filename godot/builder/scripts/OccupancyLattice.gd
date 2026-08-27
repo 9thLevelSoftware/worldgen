@@ -414,6 +414,7 @@ func _hydrate_prop_constraints(prop: Dictionary, cell: Vector3i, occupancy: Dict
 		if str(rec.get("proto", "")) != proto or (not room_role.is_empty() and str(rec.get("role", "")) != room_role):
 			continue
 		prop["wall_adjacent"] = _PALETTE.is_wall_adjacent(rec)
+		prop["place"] = _prop_place(rec)
 		prop["allowed_yaw_deg"] = rec.get("allowed_yaw_deg", [])
 		matched = true
 		break
@@ -428,8 +429,22 @@ func _hydrate_prop_constraints(prop: Dictionary, cell: Vector3i, occupancy: Dict
 			if rec_id != visual_id and rec_id != proto:
 				continue
 			prop["wall_adjacent"] = _PALETTE.is_wall_adjacent(rec)
+			prop["place"] = _prop_place(rec)
 			prop["allowed_yaw_deg"] = rec.get("allowed_yaw_deg", [])
 			return
+
+
+func _prop_place(entry: Dictionary) -> String:
+	var place := str(entry.get("place", ""))
+	if not place.is_empty():
+		return place
+	var surface := str(entry.get("surface", "")).to_lower()
+	var slot := str(entry.get("slot", "")).to_lower()
+	if slot == "center" or surface == "floor" or surface == "ceiling":
+		return "Center"
+	if slot == "wall" or surface == "wall":
+		return "WallAdjacent"
+	return "Free"
 
 
 func _parse_hydrated_links(value: Variant, room_ids: Dictionary, occupancy: Dictionary, vertical: bool) -> Dictionary:
@@ -3433,6 +3448,10 @@ func _prune_props() -> bool:
 			drop = true
 		elif _prop_ready and bool(p.get("wall_adjacent", false)) and not _wall_slots.has(key):
 			drop = true
+		elif _prop_ready and str(p.get("place", "Free")) == "Center":
+			var room_id := int(_occupancy[key])
+			if _room_has_center_slots(room_id) and not _center_slots.has(key):
+				drop = true
 		elif _prop_ready and not _wall_slots.has(key) and not _center_slots.has(key):
 			drop = true
 		if drop:

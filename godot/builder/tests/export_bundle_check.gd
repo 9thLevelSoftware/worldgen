@@ -35,6 +35,7 @@ func _run_checks() -> void:
 		])
 	else:
 		_check_bundle(app)
+		_check_legacy_empty_kit_manifest(app)
 		_check_overwrite(app)
 		await _check_stale_validation(app)
 	app.get_tree().auto_accept_quit = true
@@ -100,6 +101,25 @@ func _check_overwrite(app: Node) -> void:
 	var replaced: Dictionary = app._export_bundle(TARGET, true)
 	if not bool(replaced.get("ok", false)) or not FileAccess.file_exists(TARGET.path_join("manifest.json")):
 		_fail("atomic overwrite failed")
+
+
+func _check_legacy_empty_kit_manifest(app: Node) -> void:
+	# Export an otherwise validated document through the legacy empty-kit path.
+	# The manifest must record the Rust-resolved primary kit, not an empty id.
+	app._kit_id = ""
+	var result: Dictionary = app._export_bundle(TARGET, true)
+	if not bool(result.get("ok", false)):
+		_fail("legacy empty-kit export failed: %s" % result.get("error", ""))
+		return
+	var manifest_file := FileAccess.open(TARGET.path_join("manifest.json"), FileAccess.READ)
+	var manifest: Variant = JSON.parse_string(manifest_file.get_as_text())
+	if not manifest is Dictionary:
+		_fail("legacy empty-kit manifest is not JSON")
+		return
+	if str(manifest.get("kit_id", "")) != "ship_structural_v0":
+		_fail("legacy empty-kit manifest did not record primary kit: %s" % manifest)
+	if str(manifest.get("kit_path", "")) != app._kit_path("ship_structural_v0"):
+		_fail("legacy empty-kit manifest did not record primary kit path: %s" % manifest)
 
 
 func _check_stale_validation(app: Node) -> void:

@@ -24,6 +24,7 @@ func _run_checks() -> void:
 		_check_reset(lattice)
 	_check_exterior_hazard_hydration()
 	_check_duplicate_prop_cell_rejected()
+	_check_center_prop_reconciled_after_compile()
 	_check_three_way_coalescence()
 
 	lattice.free()
@@ -182,6 +183,41 @@ func _check_duplicate_prop_cell_rejected() -> void:
 		_fail("hydration accepted multiple props on one occupied cell: %s" % result.get("error", "success"))
 	lattice.free()
 	print("DUPLICATE_PROP_CELL_OK hydration enforces one prop per cell")
+
+
+func _check_center_prop_reconciled_after_compile() -> void:
+	var Lattice := load("res://scripts/OccupancyLattice.gd")
+	var lattice = Lattice.new()
+	root.add_child(lattice)
+	lattice.set_prop_palette({"furnishing": [{
+		"role": "cargo", "proto": "center_crate", "kind": "Container",
+		"place": "Center", "allowed_yaw_deg": [],
+	}]})
+	var document := {
+		"topology": {
+			"rooms": [{"id": 1, "stable_id": "cargo_01", "role": "cargo", "deck": 0, "cells": [[0, 0], [1, 0]]}],
+			"portals": [], "verticals": [],
+		},
+		"props": [{
+			"id": 1, "kind": "Container", "proto": "center_crate", "visual_id": "",
+			"cell": [0, 0, 0], "rotation": 0,
+		}],
+		"hazards": {"source": "authored", "fire_zones": [], "breach_zones": [], "arc_zones": [], "radiation_zones": []},
+	}
+	var result: Dictionary = lattice.hydrate_document(document)
+	if not result.get("ok", false):
+		_fail("center prop fixture failed to hydrate: %s" % result.get("error", "unknown"))
+	else:
+		# The saved prop is on a wall slot while the room has a center slot.
+		# Interactive placement rejects that location for a Center proto; a
+		# topology recompile must apply the same rule to the hydrated prop.
+		lattice.set_compile_result({"cargo_01": {
+			"reserved_cells": [], "wall_slots": [[0, 0, 0]], "center_slots": [[1, 0, 0]],
+		}}, {}, true)
+		if not lattice.get_props().is_empty():
+			_fail("Center prop survived reconciliation on a non-center slot")
+	lattice.free()
+	print("CENTER_PROP_RECONCILE_OK hydrated Center constraint pruned after topology compile")
 
 
 func _representative_document() -> Dictionary:

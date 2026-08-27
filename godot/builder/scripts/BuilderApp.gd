@@ -809,7 +809,12 @@ func _export_bundle(target: String, overwrite: bool) -> Dictionary:
 	golden = _golden_from_lattice()
 	if not _compile_ok or not _session.validation_matches_current():
 		return _export_failure("StaleValidation", "The current source has not passed validation.")
-	var kit := str(golden.get("kit_id", "ship_structural_v0"))
+	# Legacy GoldenArea documents may omit kit_id or carry it as an empty
+	# string. Rust resolves that representation to the primary kit, so the
+	# manifest must use the same canonical id and real asset path.
+	var kit := _resolved_kit_id(golden.get("kit_id", ""))
+	golden["kit_id"] = kit
+	_kit_id = kit
 	var docs: Dictionary = author.export_playable(golden, kit)
 	var err := str(docs.get("error", ""))
 	if not err.is_empty():
@@ -938,6 +943,11 @@ func _kit_path(kit: String) -> String:
 	if _content_root_path.is_empty():
 		return ""
 	return _content_root_path.path_join("data/kits/%s.json" % kit)
+
+
+func _resolved_kit_id(value: Variant) -> String:
+	var kit := str(value).strip_edges()
+	return kit if not kit.is_empty() else "ship_structural_v0"
 
 
 func _safe_bundle_name(value: String) -> String:

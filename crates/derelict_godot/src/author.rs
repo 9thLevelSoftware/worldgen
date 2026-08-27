@@ -16,9 +16,7 @@ use derelict_core::structural::compile::{
 use derelict_core::structural::export::{layout_from_golden_with_picker, structural_plan_to_json};
 use derelict_core::structural::plan::{RoomId, StructuralPlan, Topology, NO_ROOM};
 use derelict_core::structural::sockets::SocketCatalog;
-use derelict_core::structural::validate::{
-    validate, ValidationIssue, ValidationPolicy, FLOOR_MODULES,
-};
+use derelict_core::structural::validate::{validate, ValidationIssue, ValidationPolicy};
 use derelict_core::topology::room_path;
 use derelict_core::Role;
 use godot::builtin::{
@@ -99,18 +97,7 @@ impl DerelictAuthor {
 
     fn floor_modules_for(&self, kit_id: &str) -> Option<Vec<String>> {
         let catalog = self.catalog_for(kit_id)?;
-        let mut ids: Vec<String> = catalog
-            .modules
-            .values()
-            .filter(|m| has_complete_floor_sockets(m))
-            .map(|m| m.module_id.clone())
-            .collect();
-        if ids.is_empty() {
-            return Some(FLOOR_MODULES.iter().map(|s| (*s).to_string()).collect());
-        }
-        ids.sort();
-        ids.dedup();
-        Some(ids)
+        Some(floor_module_ids(catalog))
     }
 
     fn compile_golden(&self, golden: &GoldenArea) -> Result<CompileOut, String> {
@@ -145,6 +132,18 @@ impl DerelictAuthor {
 fn has_complete_floor_sockets(module: &derelict_core::structural::sockets::ModuleContract) -> bool {
     module.sockets.iter().any(|s| s.kind == "floor_edge")
         && module.sockets.iter().any(|s| s.kind == "floor_top")
+}
+
+fn floor_module_ids(catalog: &SocketCatalog) -> Vec<String> {
+    let mut ids: Vec<String> = catalog
+        .modules
+        .values()
+        .filter(|m| has_complete_floor_sockets(m))
+        .map(|m| m.module_id.clone())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
 }
 
 /// GoldenArea documents created before kits were persisted have an empty
@@ -1398,6 +1397,7 @@ mod tests {
 
         let catalog = catalog_for_loaded(Some(&palettes), &catalogs, "ship_structural_industrial")
             .expect("non-primary catalog should resolve");
+        assert_eq!(floor_module_ids(catalog), vec!["industrial_floor"]);
         assert_eq!(
             legal_module_ids(Some(catalog), "floor", "bridge"),
             vec!["industrial_floor"]
@@ -1405,5 +1405,29 @@ mod tests {
         assert!(legal_module_ids(None, "floor", "bridge")
             .iter()
             .all(|id| id != "industrial_floor"));
+    }
+
+    #[test]
+    fn kit_without_complete_floor_module_never_falls_back_to_primary_defaults() {
+        let mut modules = BTreeMap::new();
+        modules.insert(
+            "edge_only_floor".to_string(),
+            derelict_core::structural::sockets::ModuleContract {
+                module_id: "edge_only_floor".to_string(),
+                module_family: String::new(),
+                sockets: vec![derelict_core::structural::sockets::SocketDef {
+                    id: "edge".to_string(),
+                    kind: "floor_edge".to_string(),
+                    position_m: [0.0; 3],
+                    compatible_kinds: Vec::new(),
+                }],
+            },
+        );
+        let catalog = SocketCatalog { modules };
+
+        // A selected kit with modules but no complete floor contract must
+        // produce an empty allowlist. Authorizing FLOOR_MODULES here would
+        // silently borrow modules from the primary kit.
+        assert!(floor_module_ids(&catalog).is_empty());
     }
 }
