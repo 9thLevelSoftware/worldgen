@@ -1921,11 +1921,28 @@ func _golden_from_lattice() -> Dictionary:
 
 func _prune_stale_module_overrides() -> bool:
 	var dirty := false
-	var ceil: Dictionary = _module_overrides.get("ceilings", {})
-	for key in ceil.keys():
-		if _lattice.has_vertical_at_key(str(key)):
-			ceil.erase(key)
-			dirty = true
+	# The compile plan is authoritative for both floor and ceiling targets.  A
+	# cell can disappear after erasing occupancy without becoming a vertical,
+	# so checking only vertical-suppressed ceilings leaves stale overrides that
+	# keep validation blocked.
+	for ov_map in ["floors", "ceilings"]:
+		var overrides: Dictionary = _module_overrides.get(ov_map, {})
+		var live_keys: Dictionary = {}
+		var placement_key := "floor_placements" if ov_map == "floors" else "ceiling_placements"
+		for rec_v in _last_plan.get(placement_key, []):
+			if rec_v is Dictionary:
+				var key := str((rec_v as Dictionary).get("cell_key", ""))
+				if not key.is_empty():
+					live_keys[key] = true
+		if ov_map == "floors":
+			var occupancy: Variant = _last_plan.get("occupancy", {})
+			if occupancy is Dictionary:
+				for key in (occupancy as Dictionary).keys():
+					live_keys[str(key)] = true
+		for key in overrides.keys():
+			if not live_keys.has(str(key)):
+				overrides.erase(key)
+				dirty = true
 	var ov: Dictionary = _module_overrides.get("edges", {})
 	for key in ov.keys():
 		var rec := _plan_edge(str(key))

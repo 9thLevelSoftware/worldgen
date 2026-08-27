@@ -127,6 +127,33 @@ func _run_checks() -> void:
 			or str(rebuilt.get("goal_room", "")) != app._goal_room:
 		_fail("source reconstruction downgraded derelict scope or anchors")
 
+	# Erasing an occupied cell must remove every floor/ceiling override keyed to
+	# that cell, not only ceilings suppressed by a vertical opening. The
+	# cleanup is a normal session command and remains undoable.
+	var erased_override_doc: Dictionary = app._empty_golden()
+	erased_override_doc["topology"]["rooms"] = [{
+		"id": 1, "stable_id": "cargo_01", "role": "cargo", "deck": 0,
+		"cells": [[0, 0], [1, 0]],
+	}]
+	erased_override_doc["module_overrides"]["floors"]["1|0|0"] = "floor_1x1"
+	erased_override_doc["module_overrides"]["ceilings"]["1|0|0"] = "ceiling_cap_1x1"
+	app._session.start_new(erased_override_doc)
+	if not app._apply_source_document(erased_override_doc):
+		_fail("erased override fixture failed to hydrate")
+	app._lattice._erase_cell(Vector3i(1, 0, 0))
+	await create_timer(0.15).timeout
+	if (app._module_overrides.get("floors", {}) as Dictionary).has("1|0|0") \
+			or (app._module_overrides.get("ceilings", {}) as Dictionary).has("1|0|0"):
+		_fail("erased cell left stale floor or ceiling override")
+	if not app._compile_ok or not app._session.validation_matches_current():
+		_fail("validation did not recover after erased override cleanup")
+	if not app._session.can_undo():
+		_fail("erased override cleanup was not recorded as undoable")
+	app._undo_document()
+	if not (app._module_overrides.get("floors", {}) as Dictionary).has("1|0|0") \
+			or not (app._module_overrides.get("ceilings", {}) as Dictionary).has("1|0|0"):
+		_fail("undo did not restore erased cell overrides")
+
 	# A vertical opening suppresses its ceiling. The authored ceiling override
 	# must be removed as part of the topology command, and that cleanup must be
 	# reversible with the same complete-document undo history.
