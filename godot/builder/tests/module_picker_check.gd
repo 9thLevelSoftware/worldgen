@@ -10,6 +10,11 @@ const WEST_DOOR := "0|v|0|-1"
 
 
 func _initialize() -> void:
+	# SceneTree -s: node _ready() runs after _initialize. Defer tree-backed checks.
+	call_deferred("_run_checks")
+
+
+func _run_checks() -> void:
 	var failed := false
 
 	if Inspector.HATCH_NOTE != "visual mismatch, legal id":

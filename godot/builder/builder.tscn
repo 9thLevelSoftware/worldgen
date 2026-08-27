@@ -47,41 +47,44 @@ theme_override_constants/separation = 8
 [node name="Title" type="Label" parent="VBox/TopBar"]
 layout_mode = 2
 text = "Derelict Builder"
+theme_type_variation = "HeaderSmall"
 
-[node name="PhaseBar" type="TabBar" parent="VBox/TopBar"]
+[node name="NewBtn" type="Button" parent="VBox/TopBar"]
 unique_name_in_owner = true
 layout_mode = 2
-size_flags_horizontal = 3
+text = "New"
 
-[node name="DeckDown" type="Button" parent="VBox/TopBar"]
+[node name="OpenBtn" type="Button" parent="VBox/TopBar"]
 unique_name_in_owner = true
 layout_mode = 2
-text = "Deck −"
+text = "Open"
 
-[node name="DeckLabel" type="Label" parent="VBox/TopBar"]
+[node name="SaveBtn" type="Button" parent="VBox/TopBar"]
 unique_name_in_owner = true
 layout_mode = 2
-text = "Deck 0 / 0"
+text = "Save"
 
-[node name="DeckUp" type="Button" parent="VBox/TopBar"]
+[node name="SaveAsBtn" type="Button" parent="VBox/TopBar"]
 unique_name_in_owner = true
 layout_mode = 2
-text = "Deck +"
+text = "Save As"
 
-[node name="AddDeck" type="Button" parent="VBox/TopBar"]
+[node name="DirtyLabel" type="Label" parent="VBox/TopBar"]
 unique_name_in_owner = true
 layout_mode = 2
-text = "Add deck"
+text = "Saved · Untitled"
 
-[node name="IsoBtn" type="Button" parent="VBox/TopBar"]
+[node name="UndoBtn" type="Button" parent="VBox/TopBar"]
 unique_name_in_owner = true
 layout_mode = 2
-text = "Cam: Iso"
+text = "Undo"
+disabled = true
 
-[node name="ExportBtn" type="Button" parent="VBox/TopBar"]
+[node name="RedoBtn" type="Button" parent="VBox/TopBar"]
 unique_name_in_owner = true
 layout_mode = 2
-text = "Export playable"
+text = "Redo"
+disabled = true
 
 [node name="RootLabel" type="Label" parent="VBox/TopBar"]
 unique_name_in_owner = true
@@ -91,15 +94,61 @@ horizontal_alignment = 2
 text = "content root: —"
 clip_text = true
 
+[node name="RunGameBtn" type="Button" parent="VBox/TopBar"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Run in Game"
+disabled = true
+tooltip_text = "Runtime preview runner is not connected yet. Use Validate & Run to review blockers."
+
+[node name="StageBar" type="HBoxContainer" parent="VBox"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="StageCaption" type="Label" parent="VBox/StageBar"]
+layout_mode = 2
+text = "Authoring stage"
+
+[node name="PhaseBar" type="TabBar" parent="VBox/StageBar"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="ExportBtn" type="Button" parent="VBox/StageBar"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Export Bundle"
+
 [node name="Body" type="HSplitContainer" parent="VBox"]
 layout_mode = 2
 size_flags_vertical = 3
-split_offset = -420
+split_offset = 280
 
 [node name="LeftDock" type="VBoxContainer" parent="VBox/Body"]
-custom_minimum_size = Vector2(200, 0)
+custom_minimum_size = Vector2(250, 0)
 layout_mode = 2
 theme_override_constants/separation = 6
+
+[node name="StagesTitle" type="Label" parent="VBox/Body/LeftDock"]
+layout_mode = 2
+text = "Workspace checklist"
+theme_type_variation = "HeaderSmall"
+
+[node name="StageChecklist" type="ItemList" parent="VBox/Body/LeftDock"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 155)
+layout_mode = 2
+allow_reselect = true
+
+[node name="StageBlocker" type="PanelContainer" parent="VBox/Body/LeftDock"]
+unique_name_in_owner = true
+layout_mode = 2
+
+[node name="StageBlockerLabel" type="Label" parent="VBox/Body/LeftDock/StageBlocker"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Ready: paint the first room."
+autowrap_mode = 3
 
 [node name="ToolsTitle" type="Label" parent="VBox/Body/LeftDock"]
 layout_mode = 2
@@ -155,9 +204,49 @@ layout_mode = 2
 [node name="CenterSplit" type="HSplitContainer" parent="VBox/Body"]
 layout_mode = 2
 size_flags_horizontal = 3
-split_offset = 240
+split_offset = -320
 
-[node name="View" type="SubViewportContainer" parent="VBox/Body/CenterSplit"]
+[node name="CanvasColumn" type="VBoxContainer" parent="VBox/Body/CenterSplit"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/separation = 4
+
+[node name="CanvasToolbar" type="HBoxContainer" parent="VBox/Body/CenterSplit/CanvasColumn"]
+layout_mode = 2
+theme_override_constants/separation = 6
+
+[node name="DeckDown" type="Button" parent="VBox/Body/CenterSplit/CanvasColumn/CanvasToolbar"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Deck −"
+
+[node name="DeckLabel" type="Label" parent="VBox/Body/CenterSplit/CanvasColumn/CanvasToolbar"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Deck 0 / 0"
+
+[node name="DeckUp" type="Button" parent="VBox/Body/CenterSplit/CanvasColumn/CanvasToolbar"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Deck +"
+
+[node name="AddDeck" type="Button" parent="VBox/Body/CenterSplit/CanvasColumn/CanvasToolbar"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Add deck"
+
+[node name="IsoBtn" type="Button" parent="VBox/Body/CenterSplit/CanvasColumn/CanvasToolbar"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Camera: Isometric"
+
+[node name="LayerLabel" type="Label" parent="VBox/Body/CenterSplit/CanvasColumn/CanvasToolbar"]
+layout_mode = 2
+size_flags_horizontal = 3
+horizontal_alignment = 2
+text = "Layers: occupancy + authored preview"
+
+[node name="View" type="SubViewportContainer" parent="VBox/Body/CenterSplit/CanvasColumn"]
 unique_name_in_owner = true
 layout_mode = 2
 size_flags_horizontal = 3
@@ -165,20 +254,41 @@ size_flags_vertical = 3
 stretch = true
 mouse_filter = 0
 
-[node name="SubViewport" type="SubViewport" parent="VBox/Body/CenterSplit/View"]
+[node name="SubViewport" type="SubViewport" parent="VBox/Body/CenterSplit/CanvasColumn/View"]
 unique_name_in_owner = true
 own_world_3d = true
 handle_input_locally = false
 size = Vector2i(800, 600)
 render_target_update_mode = 4
 
-[node name="OccupancyLattice" type="Node3D" parent="VBox/Body/CenterSplit/View/SubViewport"]
+[node name="OccupancyLattice" type="Node3D" parent="VBox/Body/CenterSplit/CanvasColumn/View/SubViewport"]
 unique_name_in_owner = true
 script = ExtResource("2")
 
-[node name="StructuralPreview" type="Node3D" parent="VBox/Body/CenterSplit/View/SubViewport"]
+[node name="StructuralPreview" type="Node3D" parent="VBox/Body/CenterSplit/CanvasColumn/View/SubViewport"]
 unique_name_in_owner = true
 script = ExtResource("5")
+
+[node name="Guidance" type="VBoxContainer" parent="VBox/Body/CenterSplit/CanvasColumn"]
+layout_mode = 2
+theme_override_constants/separation = 2
+
+[node name="CurrentToolLabel" type="Label" parent="VBox/Body/CenterSplit/CanvasColumn/Guidance"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Current tool: Paint occupancy"
+
+[node name="NextActionLabel" type="Label" parent="VBox/Body/CenterSplit/CanvasColumn/Guidance"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Next action: Paint a room cell in the canvas."
+autowrap_mode = 3
+
+[node name="PendingEndpointLabel" type="Label" parent="VBox/Body/CenterSplit/CanvasColumn/Guidance"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Endpoint: none selected"
+autowrap_mode = 3
 
 [node name="RightDock" type="VBoxContainer" parent="VBox/Body/CenterSplit"]
 custom_minimum_size = Vector2(280, 0)
@@ -191,9 +301,11 @@ layout_mode = 2
 size_flags_vertical = 3
 script = ExtResource("3")
 
-[node name="IssuesTitle" type="Label" parent="VBox/Body/CenterSplit/RightDock"]
+[node name="ProblemsTitle" type="Label" parent="VBox/Body/CenterSplit/RightDock"]
+unique_name_in_owner = true
 layout_mode = 2
-text = "Compile issues"
+text = "Problems"
+theme_type_variation = "HeaderSmall"
 
 [node name="IssuesList" type="ItemList" parent="VBox/Body/CenterSplit/RightDock"]
 unique_name_in_owner = true
@@ -204,5 +316,5 @@ size_flags_vertical = 3
 [node name="StatusLabel" type="Label" parent="VBox"]
 unique_name_in_owner = true
 layout_mode = 2
-text = "LMB paint · RMB erase · click select · Q/E [ ] deck"
+text = "Hover: move over the canvas for placement feedback."
 autowrap_mode = 3

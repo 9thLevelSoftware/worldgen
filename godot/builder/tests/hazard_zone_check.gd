@@ -224,6 +224,20 @@ func _check_stamp_role_compartment() -> void:
 	lattice.stamp_role("airlock")
 	if str(lattice.get_hazards()[0].get("compartment_id", "")) != "":
 		_fail("stamp_role airlock should clear stale engineering cid")
+	# Coalescing adjacent rooms must prune a portal that is no longer a room edge.
+	var portal_lattice = Lattice.new()
+	root.add_child(portal_lattice)
+	portal_lattice.active_role = "cargo"
+	portal_lattice.paint_cell(Vector3i(0, 0, 0))
+	portal_lattice.create_room()
+	portal_lattice.active_role = "bridge"
+	portal_lattice.paint_cell(Vector3i(1, 0, 0))
+	portal_lattice.try_place_portal(Vector3i(0, 0, 0), Vector3i(1, 0, 0))
+	portal_lattice.select_room_id(int(portal_lattice.get_rooms()[1].get("id", 0)))
+	portal_lattice.stamp_role("cargo")
+	if not portal_lattice.get_portals().is_empty():
+		_fail("role coalescing should prune invalid portal")
+	portal_lattice.free()
 	print("STAMP_ROLE_OK compartment_id refresh")
 	lattice.free()
 
@@ -365,14 +379,15 @@ func _check_phase4_tab() -> void:
 	var app = scene.instantiate()
 	root.add_child(app)
 	var bar: TabBar = app.get_node("%PhaseBar")
-	if bar == null or bar.tab_count < 4:
-		_fail("PhaseBar missing 4 tabs")
+	if bar == null or bar.tab_count != 5:
+		_fail("PhaseBar missing five guided stages")
 	else:
-		if bar.get_tab_title(3).find("Hazard") < 0:
-			_fail("tab 4 should be Hazards, got %s" % bar.get_tab_title(3))
+		if bar.get_tab_title(3) != "Gameplay":
+			_fail("stage 4 should be Gameplay, got %s" % bar.get_tab_title(3))
 		if bar.is_tab_disabled(3):
-			_fail("Phase 4 Hazards tab should be enabled")
-		if not bar.is_tab_disabled(2):
-			_fail("Phase 3 Assets should stay disabled (module picker is a later PR)")
+			_fail("Gameplay stage should stay selectable")
+		for i in bar.tab_count:
+			if bar.is_tab_disabled(i):
+				_fail("guided stage %d was disabled" % i)
 	app.free()
-	print("PHASE4_OK tab enabled")
+	print("PHASE4_OK Gameplay selectable with five guided stages")

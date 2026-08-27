@@ -14,7 +14,7 @@ use crate::model::{
 };
 use crate::role::Role;
 use crate::stages::furnish::{implied_access_entities, interior_zones};
-use crate::structural::compile::DefaultModulePicker;
+use crate::structural::compile::{DefaultModulePicker, ModulePicker};
 use crate::structural::plan::{
     edge_key, Cell, DamageVariant, Dir, EdgeRecord, FloorPlacement, RoomId, StructuralPlan, NO_ROOM,
 };
@@ -440,9 +440,33 @@ pub struct PlayableExport {
 /// Compile + validate a golden area, synthesize a `Ship`, and reuse the
 /// existing serializers with `stable_id` room names. Fail-closed.
 pub fn layout_from_golden(golden: &GoldenArea) -> Result<PlayableExport, String> {
+    let default_kit = ExportOptions::default().kit_id;
+    // Older GoldenArea documents omitted kit_id. Treat that legacy empty value
+    // as the default kit before applying the compatibility export check.
+    let resolved_kit = if golden.kit_id.is_empty() {
+        &default_kit
+    } else {
+        &golden.kit_id
+    };
+    if resolved_kit != &default_kit {
+        return Err(format!(
+			"kit '{}' requires layout_from_golden_with_picker with its resolved catalog and floor allowlist",
+			resolved_kit
+		));
+    }
+    layout_from_golden_with_picker(golden, &DefaultModulePicker, None)
+}
+
+/// Kit-aware export entry point. The caller supplies the exact picker and
+/// floor allowlist used for preview/validation so generated runtime documents
+/// cannot silently fall back to a different structural kit.
+pub fn layout_from_golden_with_picker(
+    golden: &GoldenArea,
+    picker: &dyn ModulePicker,
+    allowed_floor_modules: Option<Vec<String>>,
+) -> Result<PlayableExport, String> {
     let topology = golden.to_topology()?;
-    let (plan, _stale) =
-        compile_authored(&topology, &DefaultModulePicker, &golden.module_overrides);
+    let (plan, _stale) = compile_authored(&topology, picker, &golden.module_overrides);
 
     let (entry_sid, goal_sid) = golden.resolved_entry_goal()?;
     let entry_room = resolve_stable_id(golden, &entry_sid)?;
@@ -461,10 +485,11 @@ pub fn layout_from_golden(golden: &GoldenArea) -> Result<PlayableExport, String>
             format!("CriticalPathBroken: no BFS path from '{entry_sid}' to '{goal_sid}'")
         })?
     };
-    let policy = match golden.scope {
+    let mut policy = match golden.scope {
         GoldenScope::Room | GoldenScope::Area => ValidationPolicy::pre_damage(Vec::new()),
         GoldenScope::Derelict => ValidationPolicy::pre_damage(critical_path.clone()),
     };
+    policy.allowed_floor_modules = allowed_floor_modules;
     if let Err(issues) = validate(&plan, &topology, &policy) {
         return Err(issues
             .iter()
@@ -622,7 +647,11 @@ fn overlay_authored(
     let mut vented: Vec<Value> = Vec::new();
     let mut seen_cid: BTreeSet<&str> = BTreeSet::new();
     for room in &golden.topology.rooms {
-        if let Some(vars) = golden.room_vars.get(&room.id.to_string()) {
+        if let Some(vars) = golden
+            .room_vars
+            .get(&room.stable_id)
+            .or_else(|| golden.room_vars.get(&room.id.to_string()))
+        {
             vars_by_name.insert(room.stable_id.as_str(), vars);
             if vars.vented {
                 if let Some(cid) = compartment_for_role(&room.role) {
@@ -655,7 +684,59 @@ fn overlay_authored(
         }
     }
 
-    overlay_loot_contents(slice, golden)
+    overlay_loot_contents(slice, golden)?;
+    if let Some(obj) = slice.as_object_mut() {
+        obj.insert("placed_props".into(), authored_placed_props(golden)?);
+    }
+    Ok(())
+}
+
+/// Export authored props as placement/visual identity.  Inventory interaction
+/// remains represented by `loot_containers`; this projection deliberately does
+/// not create a second loot authority for the runtime.
+fn authored_placed_props(golden: &GoldenArea) -> Result<Value, String> {
+    golden
+        .props
+        .iter()
+        .map(|prop| {
+            let room_id = room_stable_at(golden, prop.cell).ok_or_else(|| {
+                format!(
+                    "authored prop '{}' has no room ownership at cell {:?}",
+                    prop.id, prop.cell
+                )
+            })?;
+            let mut row = serde_json::Map::new();
+            row.insert("id".into(), json!(format!("prop_{}", prop.id)));
+            row.insert("kind".into(), json!(prop.kind));
+            row.insert("proto".into(), json!(prop.proto));
+            row.insert("visual_id".into(), json!(prop.visual_id));
+            row.insert("room_id".into(), json!(room_id));
+            row.insert("cell".into(), json!(prop.cell));
+            row.insert("approach_cell".into(), json!(prop.cell));
+            row.insert("rotation".into(), json!(prop.rotation));
+            row.insert("facing".into(), json!(prop.facing));
+            row.insert("locked".into(), json!(prop.locked));
+            row.insert("inventory_mode".into(), json!(prop.inventory_mode));
+            match prop.inventory_mode {
+                InventoryMode::Explicit => {
+                    row.insert("contents".into(), loot_contents_json(prop));
+                    if let Some(table) = prop.loot_table.as_ref().filter(|t| !t.is_empty()) {
+                        row.insert("loot_table".into(), json!(table));
+                    }
+                }
+                InventoryMode::LootTable => {
+                    if let Some(table) = prop.loot_table.as_ref().filter(|t| !t.is_empty()) {
+                        row.insert("loot_table".into(), json!(table));
+                    }
+                }
+                InventoryMode::Empty => {
+                    row.insert("contents".into(), json!([]));
+                }
+            }
+            Ok(Value::Object(row))
+        })
+        .collect::<Result<Vec<_>, String>>()
+        .map(Value::Array)
 }
 
 /// Loader `COMPARTMENT_FOR_ROLE`. Unmapped roles stay visual-only.

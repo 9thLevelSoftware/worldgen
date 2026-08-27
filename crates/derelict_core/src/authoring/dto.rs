@@ -3,7 +3,7 @@
 use crate::model::EntityKind;
 use crate::role::Role;
 use crate::structural::plan::{
-    Cell, EdgeKind, PortalIntent, RoomId, RoomSpec, Topology, VerticalConnection, CELL_SIZE_M,
+    Cell, Dir, EdgeKind, PortalIntent, RoomId, RoomSpec, Topology, VerticalConnection, CELL_SIZE_M,
     DECK_HEIGHT_M,
 };
 use serde::{Deserialize, Serialize};
@@ -181,6 +181,13 @@ fn cell_to_xyz(cell: Cell) -> [i32; 3] {
     [cell.x, cell.y, i32::from(cell.deck)]
 }
 
+fn hazard_cell(xyz: [i32; 3], bucket: &str, id: &str) -> Result<Cell, String> {
+    let [x, y, deck] = xyz;
+    let deck = u8::try_from(deck)
+        .map_err(|_| format!("{bucket} zone '{id}' has invalid cell deck {deck}"))?;
+    Ok(Cell::new(deck, x, y))
+}
+
 impl TopologyDto {
     /// Compiler Topology from compact DTO rooms/portals/verticals.
     pub fn to_topology(&self) -> Result<Topology, String> {
@@ -339,7 +346,18 @@ impl GoldenArea {
                 self.deck_height_m
             ));
         }
+        let mut prop_ids = BTreeSet::new();
+        let mut prop_cells = BTreeMap::new();
         for prop in &self.props {
+            if !prop_ids.insert(prop.id) {
+                return Err(format!("duplicate prop id {}", prop.id));
+            }
+            if let Some(previous_id) = prop_cells.insert(prop.cell, prop.id) {
+                return Err(format!(
+                    "props {} and {} share cell {:?}",
+                    previous_id, prop.id, prop.cell
+                ));
+            }
             if prop.kind == EntityKind::Door {
                 return Err(format!(
                     "prop {} has kind Door; doors are implied by portals",
@@ -347,7 +365,104 @@ impl GoldenArea {
                 ));
             }
         }
+        self.validate_hazards()?;
         Ok(())
+    }
+
+    fn validate_hazards(&self) -> Result<(), String> {
+        let mut rooms: BTreeMap<&str, (&RoomSpecDto, BTreeSet<[i32; 2]>)> = BTreeMap::new();
+        for room in &self.topology.rooms {
+            if room.stable_id.is_empty() {
+                continue;
+            }
+            let cells = room.cells.iter().copied().collect();
+            rooms.insert(room.stable_id.as_str(), (room, cells));
+        }
+        let mut ids = BTreeSet::new();
+        let buckets: [(&str, &str, &[LinkZone]); 4] = [
+            ("fire_zones", "timed_fire", &self.hazards.fire_zones),
+            ("breach_zones", "hull_breach", &self.hazards.breach_zones),
+            ("arc_zones", "electrical_arc", &self.hazards.arc_zones),
+            (
+                "radiation_zones",
+                "radiation",
+                &self.hazards.radiation_zones,
+            ),
+        ];
+        for (bucket, expected_kind, zones) in buckets {
+            for zone in zones {
+                if zone.id.trim().is_empty() {
+                    return Err(format!("{bucket} contains a zone with an empty id"));
+                }
+                if !ids.insert(zone.id.as_str()) {
+                    return Err(format!("duplicate hazard id '{}'", zone.id));
+                }
+                if zone.kind != expected_kind {
+                    return Err(format!(
+                        "{bucket} zone '{}' has kind '{}'; expected '{expected_kind}'",
+                        zone.id, zone.kind
+                    ));
+                }
+                let Some((from_room, from_cells)) = rooms.get(zone.from_room.as_str()) else {
+                    return Err(format!(
+                        "{bucket} zone '{}' references unknown from_room '{}'",
+                        zone.id, zone.from_room
+                    ));
+                };
+                let Some((to_room, to_cells)) = rooms.get(zone.to_room.as_str()) else {
+                    return Err(format!(
+                        "{bucket} zone '{}' references unknown to_room '{}'",
+                        zone.id, zone.to_room
+                    ));
+                };
+                let from = hazard_cell(zone.from_cell, bucket, &zone.id)?;
+                let to = hazard_cell(zone.to_cell, bucket, &zone.id)?;
+                if from_room.deck != from.deck || !from_cells.contains(&[from.x, from.y]) {
+                    return Err(format!(
+                        "{bucket} zone '{}' from_cell {:?} is not owned by room '{}'",
+                        zone.id, zone.from_cell, zone.from_room
+                    ));
+                }
+                if from != to && Dir::between(from, to).is_none() {
+                    return Err(format!(
+                        "{bucket} zone '{}' endpoints {:?} -> {:?} are not adjacent",
+                        zone.id, zone.from_cell, zone.to_cell
+                    ));
+                }
+                let to_is_owned = to_room.deck == to.deck && to_cells.contains(&[to.x, to.y]);
+                if !to_is_owned && !self.hazard_matches_exterior_portal(zone, from, to) {
+                    return Err(format!(
+                        "{bucket} zone '{}' to_cell {:?} is not owned by room '{}' or aligned with an exterior portal",
+                        zone.id, zone.to_cell, zone.to_room
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn hazard_matches_exterior_portal(&self, zone: &LinkZone, from: Cell, to: Cell) -> bool {
+        if zone.to_room != zone.from_room {
+            return false;
+        }
+        self.topology.portals.iter().any(|portal| {
+            let Ok(portal_from) = hazard_cell(portal.from_cell, "portal", &zone.id) else {
+                return false;
+            };
+            let Ok(portal_to) = hazard_cell(portal.to_cell, "portal", &zone.id) else {
+                return false;
+            };
+            portal.exterior
+                && portal.from_cell == zone.from_cell
+                && portal.to_cell == zone.to_cell
+                && portal_from == from
+                && portal_to == to
+                && self
+                    .topology
+                    .rooms
+                    .iter()
+                    .any(|room| room.id == portal.from_room && room.stable_id == zone.from_room)
+        })
     }
 
     /// Room/area: missing `goal_room` defaults to entry; missing `entry_room`
@@ -396,5 +511,95 @@ impl GoldenArea {
         stable_ids: &BTreeMap<RoomId, String>,
     ) -> Result<TopologyDto, String> {
         TopologyDto::from_topology(topology, stable_ids)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample() -> GoldenArea {
+        serde_json::from_str(include_str!("../../assets/golden_areas/airlock_2x2.json")).unwrap()
+    }
+
+    fn valid_fire() -> LinkZone {
+        LinkZone {
+            id: "fire_01".into(),
+            from_room: "airlock_01".into(),
+            to_room: "airlock_01".into(),
+            from_cell: [0, 0, 0],
+            to_cell: [1, 0, 0],
+            module_id: String::new(),
+            kind: "timed_fire".into(),
+            compartment_id: String::new(),
+            rationale: String::new(),
+        }
+    }
+
+    #[test]
+    fn hazard_zone_validates_kind_ownership_and_adjacency() {
+        let mut golden = sample();
+        golden.hazards.fire_zones.push(valid_fire());
+        golden.to_topology().expect("valid authored hazard");
+
+        let mut wrong_kind = golden.clone();
+        wrong_kind.hazards.fire_zones[0].kind = "radiation".into();
+        let error = wrong_kind.to_topology().unwrap_err();
+        assert!(error.contains("expected 'timed_fire'"), "{error}");
+
+        let mut wrong_owner = golden.clone();
+        wrong_owner.hazards.fire_zones[0].from_cell = [9, 9, 0];
+        let error = wrong_owner.to_topology().unwrap_err();
+        assert!(error.contains("not owned"), "{error}");
+
+        let mut non_adjacent = golden;
+        non_adjacent.hazards.fire_zones[0].to_cell = [1, 1, 0];
+        let error = non_adjacent.to_topology().unwrap_err();
+        assert!(error.contains("not adjacent"), "{error}");
+    }
+
+    #[test]
+    fn hazard_ids_are_nonempty_and_unique_across_buckets() {
+        let mut golden = sample();
+        let mut first = valid_fire();
+        first.id.clear();
+        golden.hazards.fire_zones.push(first);
+        let error = golden.to_topology().unwrap_err();
+        assert!(error.contains("empty id"), "{error}");
+
+        let mut golden = sample();
+        golden.hazards.fire_zones.push(valid_fire());
+        let mut second = valid_fire();
+        second.kind = "radiation".into();
+        golden.hazards.radiation_zones.push(second);
+        let error = golden.to_topology().unwrap_err();
+        assert!(error.contains("duplicate hazard id"), "{error}");
+    }
+
+    #[test]
+    fn collapsed_and_aligned_exterior_hazards_match_builder_hydration() {
+        let mut collapsed = sample();
+        let mut zone = valid_fire();
+        zone.id = "collapsed_fire".into();
+        zone.to_cell = zone.from_cell;
+        collapsed.hazards.fire_zones.push(zone);
+        collapsed.to_topology().expect("collapsed marker is valid");
+
+        let mut exterior = sample();
+        let mut zone = valid_fire();
+        zone.id = "exterior_fire".into();
+        zone.to_cell = [-1, 0, 0];
+        exterior.hazards.fire_zones.push(zone);
+        exterior
+            .to_topology()
+            .expect("aligned exterior marker is valid");
+
+        let mut unaligned = sample();
+        let mut zone = valid_fire();
+        zone.id = "unaligned_exterior_fire".into();
+        zone.to_cell = [-2, 0, 0];
+        unaligned.hazards.fire_zones.push(zone);
+        let error = unaligned.to_topology().unwrap_err();
+        assert!(error.contains("not adjacent"), "{error}");
     }
 }

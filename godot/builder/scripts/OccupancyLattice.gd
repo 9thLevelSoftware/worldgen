@@ -16,6 +16,7 @@ signal hazards_changed
 signal deck_changed(deck: int)
 signal hover_info(text: String)
 signal tool_changed(tool: String)
+signal pending_changed(active: bool, cell: Vector3i)
 
 const _PALETTE := preload("res://scripts/PaletteDock.gd")
 
@@ -144,6 +145,8 @@ var _solid_dirs: Dictionary = {} # cell key -> PackedStringArray
 var _has_pending := false
 var _pending_cell := Vector3i.ZERO
 var _asset_sel: Dictionary = {}
+var _room_stable_id_remap: Dictionary = {}
+var _prop_palette: Dictionary = {}
 
 var _camera: Camera3D
 var _pivot: Node3D
@@ -180,8 +183,417 @@ func _ready() -> void:
 	_apply_camera()
 
 
+## Clear every authored field while preserving camera and palette preferences.
+## This is the document-lifecycle reset boundary; callers never reach into the
+## split room/link/prop/hazard stores directly.
+func reset_document() -> void:
+	_clear_document_state()
+	_refresh_document_visuals()
+	occupancy_changed.emit()
+	props_changed.emit()
+	hazards_changed.emit()
+	room_selected.emit({})
+
+
+## Restore all lattice-owned GoldenArea content without compiling or pruning it.
+## Invalid source fails before the live document is changed, so opening a file
+## cannot silently discard authored dependencies.
+func hydrate_document(golden: Dictionary) -> Dictionary:
+	var parsed := _parse_hydrated_document(golden)
+	var error := str(parsed.get("error", ""))
+	if not error.is_empty():
+		return {"error": error}
+
+	_clear_document_state()
+	_rooms = parsed["rooms"]
+	_occupancy = parsed["occupancy"]
+	_portals = parsed["portals"]
+	_verticals = parsed["verticals"]
+	_props = parsed["props"]
+	_hazards = parsed["hazards"]
+	_next_id = int(parsed["next_room_id"])
+	_next_prop_id = int(parsed["next_prop_id"])
+	_next_hazard_serial = int(parsed["next_hazard_serial"])
+	deck_count = int(parsed["deck_count"])
+	active_deck = clampi(active_deck, 0, deck_count - 1)
+	_refresh_document_visuals()
+	occupancy_changed.emit()
+	props_changed.emit()
+	hazards_changed.emit()
+	room_selected.emit({})
+	return {"ok": true}
+
+
+## Supply the active author palette before opening a source document. Serialized
+## AuthoredProp records intentionally omit these transient placement rules.
+func set_prop_palette(palettes: Dictionary) -> void:
+	_prop_palette = palettes.duplicate(true)
+
+
+func _clear_document_state() -> void:
+	_room_stable_id_remap.clear()
+	_rooms.clear()
+	_occupancy.clear()
+	_portals.clear()
+	_verticals.clear()
+	_props.clear()
+	_hazards.clear()
+	_selected_id = 0
+	_selected_kind = "room"
+	_selected_portal = -1
+	_selected_vertical = -1
+	_selected_prop = -1
+	_selected_hazard = -1
+	_next_id = 1
+	_next_prop_id = 1
+	_next_hazard_serial = 1
+	_armed_prop = {}
+	_prop_ready = false
+	_rotation_offset = 0
+	_reserved.clear()
+	_wall_slots.clear()
+	_center_slots.clear()
+	_solid_dirs.clear()
+	_asset_sel = {}
+	_has_pending = false
+	_pending_cell = Vector3i.ZERO
+	active_deck = 0
+	deck_count = 1
+
+
+func _refresh_document_visuals() -> void:
+	if not is_node_ready():
+		return
+	_rebuild_grid()
+	_sync_floors()
+	_sync_links()
+	_sync_hazards()
+	_sync_slots()
+	_sync_pending_anchor()
+	_apply_camera()
+	_refresh_ghost()
+	pending_changed.emit(false, Vector3i.ZERO)
+	deck_changed.emit(active_deck)
+
+
+func _parse_hydrated_document(golden: Dictionary) -> Dictionary:
+	var topology_v: Variant = golden.get("topology", {})
+	if not (topology_v is Dictionary):
+		return {"error": "topology must be an object"}
+	var topology: Dictionary = topology_v
+	var rooms_v: Variant = topology.get("rooms", [])
+	if not (rooms_v is Array):
+		return {"error": "topology.rooms must be an array"}
+
+	var rooms: Array[Dictionary] = []
+	var occupancy: Dictionary = {}
+	var room_ids: Dictionary = {}
+	var stable_ids: Dictionary = {}
+	var max_room_id := 0
+	var max_deck := 0
+	for room_v in rooms_v:
+		if not (room_v is Dictionary):
+			return {"error": "topology.rooms entries must be objects"}
+		var source: Dictionary = room_v
+		var room_id := int(source.get("id", 0))
+		var stable_id := str(source.get("stable_id", "")).strip_edges()
+		var role := str(source.get("role", ""))
+		var deck := int(source.get("deck", -1))
+		if room_id <= 0 or room_ids.has(room_id):
+			return {"error": "room id %d must be positive and unique" % room_id}
+		if stable_id.is_empty() or stable_ids.has(stable_id):
+			return {"error": "room stable_id '%s' must be non-empty and unique" % stable_id}
+		if ROLES.find(role) < 0:
+			return {"error": "room %d has unknown role '%s'" % [room_id, role]}
+		if deck < 0 or deck >= MAX_DECKS:
+			return {"error": "room %d deck %d is out of range" % [room_id, deck]}
+		var cells_v: Variant = source.get("cells", [])
+		if not (cells_v is Array) or (cells_v as Array).is_empty():
+			return {"error": "room %d must contain at least one cell" % room_id}
+		var cells: Array = []
+		for cell_v in cells_v:
+			if not (cell_v is Array) or (cell_v as Array).size() < 2:
+				return {"error": "room %d contains a malformed cell" % room_id}
+			var raw: Array = cell_v
+			var xy := Vector2i(int(raw[0]), int(raw[1]))
+			if not _in_aabb(xy.x, xy.y):
+				return {"error": "room %d cell %s is outside the authoring bounds" % [room_id, xy]}
+			var key := _key(Vector3i(xy.x, xy.y, deck))
+			if occupancy.has(key):
+				return {"error": "occupancy overlap at %s" % key}
+			occupancy[key] = room_id
+			cells.append(xy)
+		rooms.append({
+			"id": room_id,
+			"stable_id": stable_id,
+			"role": role,
+			"deck": deck,
+			"cells": cells,
+		})
+		room_ids[room_id] = true
+		stable_ids[stable_id] = room_id
+		max_room_id = maxi(max_room_id, room_id)
+		max_deck = maxi(max_deck, deck)
+
+	var portals_result := _parse_hydrated_links(topology.get("portals", []), room_ids, occupancy, false)
+	if portals_result.has("error"):
+		return portals_result
+	var verticals_result := _parse_hydrated_links(topology.get("verticals", []), room_ids, occupancy, true)
+	if verticals_result.has("error"):
+		return verticals_result
+
+	var props_v: Variant = golden.get("props", [])
+	if not (props_v is Array):
+		return {"error": "props must be an array"}
+	var props: Array[Dictionary] = []
+	var prop_ids: Dictionary = {}
+	var prop_cells: Dictionary = {}
+	var max_prop_id := 0
+	for prop_v in props_v:
+		if not (prop_v is Dictionary):
+			return {"error": "props entries must be objects"}
+		var prop: Dictionary = (prop_v as Dictionary).duplicate(true)
+		var prop_id := int(prop.get("id", 0))
+		var prop_cell := _xyz_cell(prop.get("cell", []))
+		if prop_id <= 0 or prop_ids.has(prop_id):
+			return {"error": "prop id %d must be positive and unique" % prop_id}
+		if not occupancy.has(_key(prop_cell)):
+			return {"error": "prop %d is not on an occupied cell" % prop_id}
+		var prop_cell_key := _key(prop_cell)
+		if prop_cells.has(prop_cell_key):
+			return {"error": "prop %d shares occupied cell with prop %d; one prop per cell" % [prop_id, prop_cells[prop_cell_key]]}
+		if str(prop.get("kind", "")).to_lower() == "door":
+			return {"error": "prop %d cannot use kind Door" % prop_id}
+		if not _prop_role_compatible(prop, prop_cell, occupancy, rooms):
+			return {"error": "prop %d proto '%s' is incompatible with owning room role" % [prop_id, str(prop.get("proto", ""))]}
+		_hydrate_prop_constraints(prop, prop_cell, occupancy, rooms)
+		props.append(prop)
+		prop_ids[prop_id] = true
+		prop_cells[prop_cell_key] = prop_id
+		max_prop_id = maxi(max_prop_id, prop_id)
+
+	var hazards_result := _parse_hydrated_hazards(golden.get("hazards", {}), stable_ids, occupancy, portals_result["items"])
+	if hazards_result.has("error"):
+		return hazards_result
+	return {
+		"rooms": rooms,
+		"occupancy": occupancy,
+		"portals": portals_result["items"],
+		"verticals": verticals_result["items"],
+		"props": props,
+		"hazards": hazards_result["items"],
+		"next_room_id": max_room_id + 1,
+		"next_prop_id": max_prop_id + 1,
+		"next_hazard_serial": int(hazards_result["next_serial"]),
+		"deck_count": clampi(max_deck + 1, 1, MAX_DECKS),
+	}
+
+
+## Read-only document check used before the app adopts visible lattice edits
+## into its session history. It deliberately shares the exact parser used by
+## hydration so interactive edits cannot create a state that reopen would reject.
+func validate_hydration_document(golden: Dictionary) -> Dictionary:
+	var parsed: Dictionary = _parse_hydrated_document(golden)
+	if parsed.has("error"):
+		return {"ok": false, "error": str(parsed.get("error", "Invalid lattice document"))}
+	return {"ok": true}
+
+
+func _hydrate_prop_constraints(prop: Dictionary, cell: Vector3i, occupancy: Dictionary, rooms: Array[Dictionary]) -> void:
+	var proto := str(prop.get("proto", ""))
+	var visual_id := str(prop.get("visual_id", ""))
+	var room_role := ""
+	var room_id := int(occupancy.get(_key(cell), 0))
+	for room in rooms:
+		if int(room.get("id", 0)) == room_id:
+			room_role = str(room.get("role", ""))
+			break
+	var matched := false
+	for rec_v in _prop_palette.get("furnishing", []):
+		if not (rec_v is Dictionary):
+			continue
+		var rec: Dictionary = rec_v
+		if str(rec.get("proto", "")) != proto or (not room_role.is_empty() and str(rec.get("role", "")) != room_role):
+			continue
+		prop["role"] = str(rec.get("role", ""))
+		prop["wall_adjacent"] = _PALETTE.is_wall_adjacent(rec)
+		prop["place"] = _prop_place(rec)
+		prop["allowed_yaw_deg"] = rec.get("allowed_yaw_deg", [])
+		matched = true
+		break
+	if matched:
+		return
+	for bucket in ["components", "dressing", "objectives"]:
+		for rec_v in _prop_palette.get(bucket, []):
+			if not (rec_v is Dictionary):
+				continue
+			var rec: Dictionary = rec_v
+			var rec_id := str(rec.get("id", rec.get("asset_id", "")))
+			if rec_id != visual_id and rec_id != proto:
+				continue
+			prop["wall_adjacent"] = _PALETTE.is_wall_adjacent(rec)
+			prop["place"] = _prop_place(rec)
+			prop["allowed_yaw_deg"] = rec.get("allowed_yaw_deg", [])
+			return
+
+
+func _prop_role_compatible(prop: Dictionary, cell: Vector3i, occupancy: Dictionary, rooms: Array[Dictionary]) -> bool:
+	var proto := str(prop.get("proto", ""))
+	var room_id := int(occupancy.get(_key(cell), 0))
+	var room_role := ""
+	for room in rooms:
+		if int(room.get("id", 0)) == room_id:
+			room_role = str(room.get("role", ""))
+			break
+	var saw_furnishing := false
+	for rec_v in _prop_palette.get("furnishing", []):
+		if not (rec_v is Dictionary):
+			continue
+		var rec: Dictionary = rec_v
+		if str(rec.get("proto", "")) != proto:
+			continue
+		saw_furnishing = true
+		var required_role := str(rec.get("role", ""))
+		if required_role.is_empty() or required_role == room_role:
+			return true
+	return not saw_furnishing
+
+
+func _prop_place(entry: Dictionary) -> String:
+	var place := str(entry.get("place", ""))
+	if not place.is_empty():
+		return place
+	var surface := str(entry.get("surface", "")).to_lower()
+	var slot := str(entry.get("slot", "")).to_lower()
+	if slot == "center" or surface == "floor" or surface == "ceiling":
+		return "Center"
+	if slot == "wall" or surface == "wall":
+		return "WallAdjacent"
+	return "Free"
+
+
+func _parse_hydrated_links(value: Variant, room_ids: Dictionary, occupancy: Dictionary, vertical: bool) -> Dictionary:
+	if not (value is Array):
+		return {"error": "%s must be an array" % ("topology.verticals" if vertical else "topology.portals")}
+	var items: Array[Dictionary] = []
+	var vertical_pairs: Dictionary = {}
+	var vertical_endpoints: Dictionary = {}
+	for item_v in value:
+		if not (item_v is Dictionary):
+			return {"error": "connection entries must be objects"}
+		var item: Dictionary = (item_v as Dictionary).duplicate(true)
+		var from_room := int(item.get("from_room", 0))
+		var to_room := int(item.get("to_room", 0))
+		var from_cell := _xyz_cell(item.get("from_cell", []))
+		var to_cell := _xyz_cell(item.get("to_cell", []))
+		var exterior := bool(item.get("exterior", false)) if not vertical else false
+		if not room_ids.has(from_room) or (not exterior and not room_ids.has(to_room)):
+			return {"error": "connection references an unknown room"}
+		if int(occupancy.get(_key(from_cell), 0)) != from_room:
+			return {"error": "connection from_cell does not belong to from_room"}
+		if not exterior and int(occupancy.get(_key(to_cell), 0)) != to_room:
+			return {"error": "connection to_cell does not belong to to_room"}
+		if vertical:
+			if from_cell.x != to_cell.x or from_cell.y != to_cell.y or absi(from_cell.z - to_cell.z) != 1:
+				return {"error": "vertical endpoints must be stacked on adjacent decks"}
+			var from_key := _key(from_cell)
+			var to_key := _key(to_cell)
+			var pair_key := "%s|%s" % [from_key if from_key < to_key else to_key, to_key if from_key < to_key else from_key]
+			if vertical_pairs.has(pair_key):
+				return {"error": "duplicate vertical endpoints %s" % pair_key}
+			if vertical_endpoints.has(from_key) or vertical_endpoints.has(to_key):
+				return {"error": "vertical endpoint is already used by another vertical"}
+			vertical_pairs[pair_key] = true
+			vertical_endpoints[from_key] = true
+			vertical_endpoints[to_key] = true
+		else:
+			var state := str(item.get("state", ""))
+			if PORTAL_STATES.find(state) < 0:
+				return {"error": "portal has invalid state '%s'" % state}
+			if not exterior and not _is_cardinal(from_cell, to_cell):
+				return {"error": "portal endpoints must be cardinal neighbors"}
+		items.append(item)
+	return {"items": items}
+
+
+func _parse_hydrated_hazards(value: Variant, stable_ids: Dictionary, occupancy: Dictionary, portals: Array[Dictionary]) -> Dictionary:
+	if not (value is Dictionary):
+		return {"error": "hazards must be an object"}
+	var source: Dictionary = value
+	var items: Array[Dictionary] = []
+	var seen: Dictionary = {}
+	var next_serial := 1
+	for kind in HAZARD_KINDS:
+		var bucket := str(HAZARD_BUCKET[kind])
+		var bucket_v: Variant = source.get(bucket, [])
+		if not (bucket_v is Array):
+			return {"error": "hazards.%s must be an array" % bucket}
+		for zone_v in bucket_v:
+			if not (zone_v is Dictionary):
+				return {"error": "hazard entries must be objects"}
+			var zone: Dictionary = (zone_v as Dictionary).duplicate(true)
+			var zone_id := str(zone.get("id", "")).strip_edges()
+			var from_room := str(zone.get("from_room", ""))
+			var to_room := str(zone.get("to_room", ""))
+			var from_cell := _xyz_cell(zone.get("from_cell", []))
+			var to_cell := _xyz_cell(zone.get("to_cell", []))
+			if zone_id.is_empty() or seen.has(zone_id):
+				return {"error": "hazard ids must be non-empty and unique"}
+			if not stable_ids.has(from_room) or not stable_ids.has(to_room):
+				return {"error": "hazard %s references an unknown room" % zone_id}
+			# Interactive authoring only produces collapsed same-cell markers
+			# (for an occupied cell adjacent to void) or cardinal, same-deck
+			# links. Keep hydration aligned so hand-authored JSON cannot create
+			# runtime hazard geometry the builder itself could never produce.
+			if from_cell != to_cell and not _is_cardinal(from_cell, to_cell):
+				return {"error": "hazard %s endpoints must be cardinal neighbors on the same deck" % zone_id}
+			if not occupancy.has(_key(from_cell)):
+				return {"error": "hazard %s references an unoccupied cell" % zone_id}
+			if int(occupancy.get(_key(from_cell), 0)) != int(stable_ids.get(from_room, 0)):
+				return {"error": "hazard %s from_room does not own from_cell" % zone_id}
+			if not occupancy.has(_key(to_cell)):
+				var exterior_portal := -1
+				for portal_idx in portals.size():
+					var portal: Dictionary = portals[portal_idx]
+					var portal_from := _xyz_cell(portal.get("from_cell", []))
+					var portal_to := _xyz_cell(portal.get("to_cell", []))
+					if not bool(portal.get("exterior", false)):
+						continue
+					if (portal_from == from_cell and portal_to == to_cell) or (portal_from == to_cell and portal_to == from_cell):
+						exterior_portal = portal_idx
+						break
+				if exterior_portal < 0:
+					return {"error": "hazard %s references an unoccupied cell" % zone_id}
+				var matched_portal: Dictionary = portals[exterior_portal]
+				var matched_from := _xyz_cell(matched_portal.get("from_cell", []))
+				var portal_from_id := int(matched_portal.get("from_room", 0))
+				if matched_from != from_cell or portal_from_id <= 0 or int(occupancy.get(_key(from_cell), 0)) != portal_from_id:
+					return {"error": "hazard %s does not align with its exterior portal" % zone_id}
+				if to_room != from_room:
+					return {"error": "hazard %s does not align with its exterior portal" % zone_id}
+			else:
+				if int(occupancy.get(_key(to_cell), 0)) != int(stable_ids.get(to_room, 0)):
+					return {"error": "hazard %s to_room does not own to_cell" % zone_id}
+			zone["kind"] = kind
+			items.append(zone)
+			seen[zone_id] = true
+			var suffix := zone_id.get_slice("_", zone_id.get_slice_count("_") - 1)
+			if suffix.is_valid_int():
+				next_serial = maxi(next_serial, int(suffix) + 1)
+	return {"items": items, "next_serial": next_serial}
+
+
 func get_rooms() -> Array[Dictionary]:
 	return _rooms
+
+
+## Return stable-ID replacements produced by the most recent room coalescence.
+## The builder consumes this synchronously from occupancy_changed so authored
+## entry/goal anchors follow the retained room instead of falling back.
+func consume_room_stable_id_remap() -> Dictionary:
+	var remap := _room_stable_id_remap.duplicate(true)
+	_room_stable_id_remap.clear()
+	return remap
 
 
 func get_selected() -> Dictionary:
@@ -366,13 +778,17 @@ func cancel_pointer() -> void:
 	_panning = false
 	_orbiting = false
 	_paint_drag = false
-	_has_pending = false
+	_cancel_pending()
 	_has_last_screen = false
 	hide_ghost()
 
 
 func has_pending_click() -> bool:
 	return _has_pending
+
+
+func pending_cell() -> Vector3i:
+	return _pending_cell
 
 
 ## Arm a new room; the RoomSpec is created on the next successful void paint.
@@ -419,13 +835,14 @@ func set_compile_result(zones: Dictionary, plan: Dictionary, ok: bool) -> void:
 	_prop_ready = ok
 	_ingest_zones(zones)
 	_ingest_solids(plan)
+	# Topology edits (portals and verticals) recompile the slot catalog. Reconcile
+	# authored props against that fresh catalog before the preview/export path can
+	# consume them; props_changed lets the session record the removal visibly.
 	var pruned := _prune_props()
 	_sync_slots()
 	_refresh_ghost()
 	if pruned:
 		props_changed.emit()
-		if _selected_kind == "prop":
-			_emit_selection()
 
 
 func try_place_prop(cell: Vector3i, hit: Vector3 = Vector3.ZERO) -> bool:
@@ -653,10 +1070,18 @@ func cancel_pending() -> void:
 	hover_info.emit("pending click cancelled")
 
 
+## Arm the occupancy brush. Does not rewrite rooms already painted, and does
+## not deselect — touching same-role cells stay one room.
+func arm_role(role: String) -> void:
+	active_role = role
+
+
+## Rewrite the selected room's role. Inspector and tests use this; the role
+## palette does not — changing the brush must not recolor laid floors.
 func stamp_role(role: String) -> void:
 	active_role = role
-	# Role palette is a room stamp. Drop portal/vertical/prop/module/hazard selection so the
-	# inspector and Delete/Backspace match the highlighted room.
+	# Drop portal/vertical/prop/module/hazard selection so the inspector and
+	# Delete/Backspace match the highlighted room.
 	var converted := _selected_kind == "portal" or _selected_kind == "vertical" or _selected_kind == "prop" or _selected_kind == "piece" or _selected_kind == "hazard"
 	if converted:
 		_selected_kind = "room"
@@ -676,6 +1101,12 @@ func stamp_role(role: String) -> void:
 		return
 	if changed:
 		room["role"] = role
+		_coalesce_touching_same_role()
+		_prune_links()
+		var props_pruned := _prune_props()
+		room = get_selected()
+		if props_pruned:
+			props_changed.emit()
 	var hz_changed := _refresh_hazard_rooms()
 	_sync_floors()
 	_sync_links()
@@ -695,14 +1126,21 @@ func apply_room_edit(edited: Dictionary) -> void:
 		if not sid.is_empty():
 			r["stable_id"] = sid
 		var role := str(edited.get("role", ""))
+		var props_pruned := false
 		if not role.is_empty():
 			r["role"] = role
+			_coalesce_touching_same_role()
+			_prune_links()
+			props_pruned = _prune_props()
+			r = get_selected()
 		var hz_changed := _refresh_hazard_rooms()
 		_sync_floors()
 		_sync_links()
 		occupancy_changed.emit()
 		if hz_changed:
 			hazards_changed.emit()
+		if props_pruned:
+			props_changed.emit()
 		room_selected.emit(r)
 		return
 
@@ -994,15 +1432,9 @@ func _try_lmb(cell: Vector3i) -> bool:
 func _try_lmb_paint(cell: Vector3i) -> bool:
 	var key := _key(cell)
 	if _occupancy.has(key):
-		var id := int(_occupancy[key])
-		# Re-click of the active room is inspect-only so inspector role
-		# edits are not overwritten by the armed palette stamp.
-		var stamped := false
-		if id != _selected_id:
-			stamped = _stamp_room_id(id, active_role)
-		select_room_id(id)
-		if stamped:
-			occupancy_changed.emit()
+		# Occupied click inspects. Role changes for existing rooms go through
+		# the inspector, not the armed brush.
+		select_room_id(int(_occupancy[key]))
 		return false
 	return _try_paint(cell)
 
@@ -1012,25 +1444,23 @@ func _try_paint(cell: Vector3i) -> bool:
 	if reason != "":
 		hover_info.emit(reason)
 		return false
-	var room := get_selected()
-	var need_new := room.is_empty()
-	if not need_new and not (room["cells"] as Array).is_empty():
-		if int(room["deck"]) != cell.z:
-			need_new = true
-	if need_new:
+	var room := _room_to_extend(cell)
+	if room.is_empty():
 		room = _make_room(active_role, cell.z)
 		_rooms.append(room)
-		_selected_id = int(room["id"])
 	if (room["cells"] as Array).is_empty():
 		room["deck"] = cell.z
 	(room["cells"] as Array).append(Vector2i(cell.x, cell.y))
 	_occupancy[_key(cell)] = int(room["id"])
+	_selected_id = int(room["id"])
 	_selected_kind = "room"
 	_selected_portal = -1
 	_selected_vertical = -1
 	_selected_prop = -1
 	_asset_sel = {}
 	_selected_hazard = -1
+	_coalesce_touching_same_role()
+	room = get_selected()
 	_prune_links()
 	var hz_pruned := _prune_hazards()
 	_sync_deck_count()
@@ -1099,14 +1529,94 @@ func _paint_block_reason(cell: Vector3i) -> String:
 		return "blocked: soft AABB 64×64"
 	if _occupancy.has(_key(cell)):
 		return "blocked: occupancy overlap"
-	var room := get_selected()
+	return ""
+
+
+func _room_to_extend(cell: Vector3i) -> Dictionary:
+	var xy := Vector2i(cell.x, cell.y)
+	var selected := get_selected()
+	if _room_accepts_cell(selected, cell.z, xy):
+		return selected
+	for r in _rooms:
+		if _room_accepts_cell(r, cell.z, xy):
+			return r
+	return {}
+
+
+func _rooms_share_cardinal(a: Dictionary, b: Dictionary) -> bool:
+	if a.is_empty() or b.is_empty():
+		return false
+	for c in b["cells"]:
+		var p: Vector2i = c
+		if _shares_cardinal(a, p):
+			return true
+	return false
+
+
+func _merge_room_into(keep: Dictionary, drop: Dictionary) -> void:
+	var kid := int(keep["id"])
+	var did := int(drop["id"])
+	var keep_stable_id := str(keep.get("stable_id", ""))
+	var drop_stable_id := str(drop.get("stable_id", ""))
+	if not drop_stable_id.is_empty() and drop_stable_id != keep_stable_id:
+		_room_stable_id_remap[drop_stable_id] = keep_stable_id
+		for prior in _room_stable_id_remap:
+			if str(_room_stable_id_remap[prior]) == drop_stable_id:
+				_room_stable_id_remap[prior] = keep_stable_id
+	var deck := int(keep["deck"])
+	var cells: Array = keep["cells"]
+	for c in drop["cells"]:
+		var p: Vector2i = c
+		cells.append(p)
+		_occupancy[_key(Vector3i(p.x, p.y, deck))] = kid
+	for p in _portals:
+		if int(p.get("from_room", 0)) == did:
+			p["from_room"] = kid
+		if int(p.get("to_room", 0)) == did:
+			p["to_room"] = kid
+	for v in _verticals:
+		if int(v.get("from_room", 0)) == did:
+			v["from_room"] = kid
+		if int(v.get("to_room", 0)) == did:
+			v["to_room"] = kid
+	if _selected_id == did:
+		_selected_id = kid
+
+
+func _coalesce_touching_same_role() -> void:
+	_room_stable_id_remap.clear()
+	# A merge can create a new touching edge through the absorbed room. Keep
+	# scanning until no pair changes so bridge rooms coalesce both earlier and
+	# later neighbors, while _merge_room_into preserves the first room's ID.
+	var changed := true
+	while changed:
+		changed = false
+		for i in _rooms.size():
+			var room: Dictionary = _rooms[i]
+			for j in range(i + 1, _rooms.size()):
+				var other: Dictionary = _rooms[j]
+				if str(other.get("role", "")) != str(room.get("role", "")):
+					continue
+				if int(other.get("deck", -1)) != int(room.get("deck", -2)):
+					continue
+				if not _rooms_share_cardinal(room, other):
+					continue
+				_merge_room_into(room, other)
+				_rooms.remove_at(j)
+				changed = true
+				break
+			if changed:
+				break
+
+
+func _room_accepts_cell(room: Dictionary, deck: int, xy: Vector2i) -> bool:
 	if room.is_empty() or (room["cells"] as Array).is_empty():
-		return ""
-	if int(room["deck"]) != cell.z:
-		return ""
-	if _shares_cardinal(room, Vector2i(cell.x, cell.y)):
-		return ""
-	return "blocked: not 4-adjacent to room"
+		return false
+	if str(room.get("role", "")) != active_role:
+		return false
+	if int(room.get("deck", -1)) != deck:
+		return false
+	return _shares_cardinal(room, xy)
 
 
 func _shares_cardinal(room: Dictionary, cell: Vector2i) -> bool:
@@ -1120,19 +1630,6 @@ func _shares_cardinal(room: Dictionary, cell: Vector2i) -> bool:
 
 func _in_aabb(x: int, y: int) -> bool:
 	return x >= AABB_MIN and x <= AABB_MAX and y >= AABB_MIN and y <= AABB_MAX
-
-
-func _stamp_room_id(id: int, role: String) -> bool:
-	for r in _rooms:
-		if int(r["id"]) != id:
-			continue
-		if str(r["role"]) == role:
-			return false
-		r["role"] = role
-		if _refresh_hazard_rooms():
-			hazards_changed.emit()
-		return true
-	return false
 
 
 func _refresh_ghost() -> void:
@@ -1256,12 +1753,7 @@ func _update_paint_ghost(cell: Vector3i) -> void:
 			if int(r["id"]) == id:
 				sid = str(r["stable_id"])
 				break
-		if id == _selected_id or sid.is_empty() or str(_room_role(id)) == active_role:
-			hover_info.emit("select %s  (%d,%d deck %d)" % [sid, cell.x, cell.y, cell.z])
-		else:
-			hover_info.emit("stamp %s on %s  (%d,%d deck %d)" % [
-				active_role, sid, cell.x, cell.y, cell.z
-			])
+		hover_info.emit("select %s  (%d,%d deck %d)" % [sid, cell.x, cell.y, cell.z])
 		return
 	_place_cell_ghost(cell, _paint_block_reason(cell), "paint (%d,%d) deck %d" % [cell.x, cell.y, cell.z])
 
@@ -1459,7 +1951,7 @@ func _color_for(room: Dictionary) -> Color:
 	var role := str(room.get("role", "compartment"))
 	var base: Color = ROLE_COLORS.get(role, Color(0.55, 0.58, 0.6))
 	var h := fmod(float(int(room.get("id", 1))) * 0.17, 1.0)
-	return base.lerp(Color.from_hsv(h, 0.35, 0.85), 0.22)
+	return base.lerp(Color.from_hsv(h, 0.45, 0.9), 0.12)
 
 
 func _style_floor_box(box: CSGBox3D, room: Dictionary, deck: int) -> void:
@@ -1468,6 +1960,7 @@ func _style_floor_box(box: CSGBox3D, room: Dictionary, deck: int) -> void:
 	if mat == null:
 		mat = StandardMaterial3D.new()
 		box.material = mat
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mat.albedo_color = col
 	var selected := int(room["id"]) == _selected_id
 	mat.emission_enabled = selected
@@ -1787,6 +2280,8 @@ func _portal_valid(p: Dictionary) -> bool:
 		return not _occupancy.has(_key(b)) and int(p.get("to_room", -1)) == 0
 	if not _occupancy.has(_key(b)):
 		return false
+	if int(_occupancy[_key(a)]) == int(_occupancy[_key(b)]):
+		return false
 	return int(_occupancy[_key(b)]) == int(p.get("to_room", -1))
 
 
@@ -1876,6 +2371,7 @@ func _cancel_pending() -> void:
 	_has_pending = false
 	_pending_cell = Vector3i.ZERO
 	_sync_pending_anchor()
+	pending_changed.emit(false, _pending_cell)
 
 
 ## First click of a two-click tool. Drops portal/vertical/hazard inspect so the
@@ -1894,7 +2390,37 @@ func _begin_pending(cell: Vector3i) -> void:
 	_sync_pending_anchor()
 	_sync_floors()
 	_sync_links()
+	pending_changed.emit(true, _pending_cell)
 	room_selected.emit(get_selected())
+
+
+func focus_diagnostic(cell: Vector3i, target_type: String = "") -> void:
+	set_active_deck(cell.z)
+	if target_type == "connection":
+		for index in range(_portals.size()):
+			var portal: Dictionary = _portals[index]
+			if _xyz_cell(portal.get("from_cell", [])) == cell or _xyz_cell(portal.get("to_cell", [])) == cell:
+				_select_portal(index, false)
+				return
+		for index in range(_verticals.size()):
+			var vertical: Dictionary = _verticals[index]
+			if _xyz_cell(vertical.get("from_cell", [])) == cell or _xyz_cell(vertical.get("to_cell", [])) == cell:
+				_select_vertical(index)
+				return
+	elif target_type == "prop":
+		for index in range(_props.size()):
+			if _xyz_cell((_props[index] as Dictionary).get("cell", [])) == cell:
+				_select_prop(index)
+				return
+	elif target_type == "hazard":
+		for index in range(_hazards.size()):
+			var hazard: Dictionary = _hazards[index]
+			if _xyz_cell(hazard.get("from_cell", [])) == cell or _xyz_cell(hazard.get("to_cell", [])) == cell:
+				_select_hazard(index, false)
+				return
+	var key := _key(cell)
+	if _occupancy.has(key):
+		select_room_id(int(_occupancy[key]))
 
 
 func _sync_pending_anchor() -> void:
@@ -2736,6 +3262,7 @@ func _place_prop(cell: Vector3i, entry: Dictionary) -> void:
 		"albedo": str(entry.get("albedo", "")),
 		"place": str(entry.get("place", "")),
 		"group": str(entry.get("group", "")),
+		"role": str(entry.get("role", "")),
 		"allowed_yaw_deg": entry.get("allowed_yaw_deg", []),
 	}
 	_next_prop_id += 1
@@ -2966,7 +3493,13 @@ func _prune_props() -> bool:
 			drop = true
 		elif _prop_ready and bool(p.get("wall_adjacent", false)) and not _wall_slots.has(key):
 			drop = true
+		elif _prop_ready and str(p.get("place", "Free")) == "Center":
+			var room_id := int(_occupancy[key])
+			if _room_has_center_slots(room_id) and not _center_slots.has(key):
+				drop = true
 		elif _prop_ready and not _wall_slots.has(key) and not _center_slots.has(key):
+			drop = true
+		elif not _prop_role_compatible(p, cell, _occupancy, _rooms):
 			drop = true
 		if drop:
 			changed = true

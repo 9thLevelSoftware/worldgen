@@ -13,15 +13,15 @@ use derelict_core::structural::compile::{
     FLOOR_MODULE, HATCH_MODULE, INNER_CORNER_MODULE, LOCKED_MODULE, OUTER_CORNER_MODULE,
     T_JUNCTION_MODULE, WALL_MODULE,
 };
-use derelict_core::structural::export::{layout_from_golden, structural_plan_to_json};
+use derelict_core::structural::export::{layout_from_golden_with_picker, structural_plan_to_json};
 use derelict_core::structural::plan::{RoomId, StructuralPlan, Topology, NO_ROOM};
 use derelict_core::structural::sockets::SocketCatalog;
-use derelict_core::structural::validate::{
-    validate, ValidationIssue, ValidationPolicy, FLOOR_MODULES,
-};
+use derelict_core::structural::validate::{validate, ValidationIssue, ValidationPolicy};
 use derelict_core::topology::room_path;
 use derelict_core::Role;
-use godot::builtin::{GString, PackedStringArray, VarArray, VarDictionary, Variant, VariantType};
+use godot::builtin::{
+    Array, GString, PackedStringArray, VarArray, VarDictionary, Variant, VariantType,
+};
 use godot::classes::RefCounted;
 use godot::meta::ToGodot;
 use godot::obj::Base;
@@ -63,6 +63,10 @@ pub struct DerelictAuthor {
     extra_kits: Vec<BuilderKitCatalog>,
     #[init(val = BTreeMap::new())]
     sockets_by_kit: BTreeMap<String, SocketCatalog>,
+    #[init(val = BTreeSet::new())]
+    kit_definition_ids: BTreeSet<String>,
+    #[init(val = BTreeMap::new())]
+    kit_module_ids: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl DerelictAuthor {
@@ -78,47 +82,29 @@ impl DerelictAuthor {
     }
 
     fn catalog_for(&self, kit_id: &str) -> Option<&SocketCatalog> {
-        self.sockets_by_kit
-            .get(kit_id)
-            .filter(|c| !c.modules.is_empty())
-            .or_else(|| {
-                self.data
-                    .as_ref()
-                    .map(|p| &p.sockets)
-                    .filter(|c| !c.modules.is_empty())
-            })
+        catalog_for_loaded(
+            self.data.as_ref(),
+            &self.sockets_by_kit,
+            resolved_kit_id(kit_id),
+        )
     }
 
-    fn picker_for(&self, kit_id: &str) -> &dyn ModulePicker {
-        match self.catalog_for(kit_id) {
-            Some(catalog) => catalog,
-            None => &DefaultModulePicker,
-        }
+    fn picker_for(&self, kit_id: &str) -> Result<&dyn ModulePicker, String> {
+        picker_for_loaded(
+            self.data.as_ref(),
+            &self.sockets_by_kit,
+            resolved_kit_id(kit_id),
+        )
     }
 
     fn floor_modules_for(&self, kit_id: &str) -> Option<Vec<String>> {
         let catalog = self.catalog_for(kit_id)?;
-        let mut ids: Vec<String> = catalog
-            .modules
-            .values()
-            .filter(|m| {
-                m.sockets
-                    .iter()
-                    .any(|s| s.kind == "floor_edge" || s.kind == "floor_top")
-            })
-            .map(|m| m.module_id.clone())
-            .collect();
-        if ids.is_empty() {
-            return Some(FLOOR_MODULES.iter().map(|s| (*s).to_string()).collect());
-        }
-        ids.sort();
-        ids.dedup();
-        Some(ids)
+        Some(floor_module_ids(catalog))
     }
 
     fn compile_golden(&self, golden: &GoldenArea) -> Result<CompileOut, String> {
         let topology = golden.to_topology()?;
-        let picker = self.picker_for(&golden.kit_id);
+        let picker = self.picker_for(&golden.kit_id)?;
         let (plan, stale) = compile_authored(&topology, picker, &golden.module_overrides);
         let mut issues = Vec::new();
         match author_policy(golden, &topology) {
@@ -145,6 +131,121 @@ impl DerelictAuthor {
     }
 }
 
+fn has_complete_floor_sockets(module: &derelict_core::structural::sockets::ModuleContract) -> bool {
+    module.sockets.iter().any(|s| s.kind == "floor_edge")
+        && module.sockets.iter().any(|s| s.kind == "floor_top")
+}
+
+fn floor_module_ids(catalog: &SocketCatalog) -> Vec<String> {
+    let mut ids: Vec<String> = catalog
+        .modules
+        .values()
+        .filter(|m| has_complete_floor_sockets(m))
+        .map(|m| m.module_id.clone())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn plan_modules_missing_from_kit_definition(
+    plan: &StructuralPlan,
+    defined_modules: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut referenced = BTreeSet::new();
+    add_non_empty_module_ids(
+        &mut referenced,
+        plan.occupancy
+            .values()
+            .map(|record| record.module_id.as_str()),
+    );
+    add_non_empty_module_ids(
+        &mut referenced,
+        plan.edges.values().map(|record| record.module_id.as_str()),
+    );
+    add_non_empty_module_ids(
+        &mut referenced,
+        plan.placements
+            .iter()
+            .map(|record| record.module_id.as_str()),
+    );
+    add_non_empty_module_ids(
+        &mut referenced,
+        plan.floor_placements
+            .iter()
+            .map(|record| record.module_id.as_str()),
+    );
+    add_non_empty_module_ids(
+        &mut referenced,
+        plan.ceiling_placements
+            .iter()
+            .map(|record| record.module_id.as_str()),
+    );
+    referenced
+        .into_iter()
+        .filter(|module_id| !defined_modules.contains(*module_id))
+        .map(str::to_string)
+        .collect()
+}
+
+fn add_non_empty_module_ids<'a, I>(referenced: &mut BTreeSet<&'a str>, module_ids: I)
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    referenced.extend(
+        module_ids
+            .into_iter()
+            .filter(|module_id| !module_id.is_empty()),
+    );
+}
+
+/// GoldenArea documents created before kits were persisted have an empty
+/// `kit_id`. Keep that legacy representation readable while resolving it at
+/// every kit-aware bridge boundary.
+fn resolved_kit_id(kit_id: &str) -> &str {
+    if kit_id.is_empty() {
+        PRIMARY_KIT
+    } else {
+        kit_id
+    }
+}
+
+fn catalog_for_loaded<'a>(
+    data: Option<&'a AuthorPalettes>,
+    sockets_by_kit: &'a BTreeMap<String, SocketCatalog>,
+    kit_id: &str,
+) -> Option<&'a SocketCatalog> {
+    let kit_id = resolved_kit_id(kit_id);
+    sockets_by_kit
+        .get(kit_id)
+        .filter(|c| !c.modules.is_empty())
+        .or_else(|| {
+            data.filter(|p| p.kit.kit_id == kit_id)
+                .map(|p| &p.sockets)
+                .filter(|c| !c.modules.is_empty())
+        })
+}
+
+fn picker_for_loaded<'a>(
+    data: Option<&'a AuthorPalettes>,
+    sockets_by_kit: &'a BTreeMap<String, SocketCatalog>,
+    kit_id: &str,
+) -> Result<&'a dyn ModulePicker, String> {
+    let kit_id = resolved_kit_id(kit_id);
+    if let Some(catalog) = catalog_for_loaded(data, sockets_by_kit, kit_id) {
+        return Ok(catalog);
+    }
+    // Offline authoring explicitly supports the embedded primary-kit picker
+    // for CSG preview and validation. Other kit IDs must never borrow it.
+    if kit_id == PRIMARY_KIT {
+        return Ok(&DefaultModulePicker);
+    }
+    Err(format!(
+        "kit '{}' is unavailable or has no loaded socket catalog",
+        kit_id
+    ))
+}
+
 struct CompileOut {
     plan: StructuralPlan,
     topology: Topology,
@@ -161,6 +262,7 @@ impl DerelictAuthor {
         let path = path.to_string();
         let mut errors: Vec<String> = Vec::new();
         let mut kits: Vec<BuilderKitCatalog> = Vec::new();
+        let mut kit_definition_ids: BTreeSet<String> = BTreeSet::new();
         let mut palettes = AuthorPalettes::offline().unwrap_or_default();
 
         if path.trim().is_empty() {
@@ -168,6 +270,8 @@ impl DerelictAuthor {
             self.data = Some(palettes);
             self.extra_kits = Vec::new();
             self.sockets_by_kit = BTreeMap::new();
+            self.kit_definition_ids = BTreeSet::new();
+            self.kit_module_ids = BTreeMap::new();
             return content_root_result(true, &[], item_count, &errors);
         }
 
@@ -178,6 +282,8 @@ impl DerelictAuthor {
                 self.data = Some(palettes);
                 self.extra_kits = Vec::new();
                 self.sockets_by_kit = BTreeMap::new();
+                self.kit_definition_ids = BTreeSet::new();
+                self.kit_module_ids = BTreeMap::new();
                 return content_root_result(false, &[], self.palettes_ref().items.len(), &errors);
             }
         };
@@ -186,6 +292,9 @@ impl DerelictAuthor {
             match read_under(&root, rel) {
                 Ok(text) => match BuilderKitCatalog::from_json(&text) {
                     Ok(kit) => {
+                        if !kit.kit_id.is_empty() {
+                            kit_definition_ids.insert(kit.kit_id.clone());
+                        }
                         if kit.kit_id == PRIMARY_KIT || palettes.kit.modules.is_empty() {
                             palettes.kit = kit.clone();
                         }
@@ -212,6 +321,20 @@ impl DerelictAuthor {
         }
 
         let mut sockets_by_kit: BTreeMap<String, SocketCatalog> = BTreeMap::new();
+        let kit_module_ids: BTreeMap<String, BTreeSet<String>> = kits
+            .iter()
+            .filter(|kit| !kit.kit_id.is_empty())
+            .map(|kit| {
+                (
+                    kit.kit_id.clone(),
+                    kit.modules
+                        .iter()
+                        .filter(|module| !module.module_id.is_empty())
+                        .map(|module| module.module_id.clone())
+                        .collect(),
+                )
+            })
+            .collect();
         for kit in &kits {
             if kit.kit_id.is_empty() {
                 continue;
@@ -279,6 +402,8 @@ impl DerelictAuthor {
         let item_count = palettes.items.len();
         self.extra_kits = kits;
         self.sockets_by_kit = sockets_by_kit;
+        self.kit_definition_ids = kit_definition_ids;
+        self.kit_module_ids = kit_module_ids;
         self.data = Some(palettes);
         content_root_result(errors.is_empty(), &kit_ids, item_count, &errors)
     }
@@ -372,12 +497,91 @@ impl DerelictAuthor {
                 godot::global::godot_error!("DerelictAuthor.export_playable: {e}");
                 export_error_dict(&e)
             }
-            Ok(mut golden) => {
-                let kit = kit_id.to_string();
-                if !kit.is_empty() {
-                    golden.kit_id = kit;
+            Ok(golden) => {
+                let requested_kit = resolved_kit_id(kit_id.to_string().as_str()).to_string();
+                let document_kit = resolved_kit_id(&golden.kit_id).to_string();
+                if requested_kit != document_kit {
+                    let e = format!(
+                        "kit mismatch: export argument '{}' must match GoldenArea kit_id '{}'",
+                        kit_id, golden.kit_id
+                    );
+                    godot::global::godot_error!("DerelictAuthor.export_playable: {e}");
+                    return export_error_dict(&e);
                 }
-                match layout_from_golden(&golden) {
+                // Compile/export the canonical kit id so legacy documents use
+                // the same catalog, picker, and floor policy as new ones.
+                let mut golden = golden;
+                golden.kit_id = document_kit;
+                if let Some(e) =
+                    missing_kit_definition_error(&self.kit_definition_ids, &golden.kit_id)
+                {
+                    godot::global::godot_error!("DerelictAuthor.export_playable: {e}");
+                    return export_error_dict(&e);
+                }
+                let compiled = match self.compile_golden(&golden) {
+                    Ok(out) => out,
+                    Err(e) => return export_error_dict(&e),
+                };
+                if !compiled.issues.is_empty() {
+                    let e = compiled
+                        .issues
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    return export_error_dict(&e);
+                }
+                if !compiled.stale.is_empty() {
+                    let e = compiled
+                        .stale
+                        .iter()
+                        .map(|s| {
+                            format!(
+                                "stale {:?} override '{}' -> '{}'",
+                                s.class, s.key, s.module_id
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    return export_error_dict(&e);
+                }
+                let defined_modules = match self.kit_module_ids.get(&golden.kit_id) {
+                    Some(modules) => modules,
+                    None => {
+                        let e = format!(
+                            "kit definition '{}' has no retained module catalog; refusing playable export",
+                            golden.kit_id
+                        );
+                        godot::global::godot_error!("DerelictAuthor.export_playable: {e}");
+                        return export_error_dict(&e);
+                    }
+                };
+                let missing_modules =
+                    plan_modules_missing_from_kit_definition(&compiled.plan, defined_modules);
+                if !missing_modules.is_empty() {
+                    let e = format!(
+                        "compiled plan references modules absent from kit definition '{}': {}",
+                        golden.kit_id,
+                        missing_modules.join(", ")
+                    );
+                    godot::global::godot_error!("DerelictAuthor.export_playable: {e}");
+                    return export_error_dict(&e);
+                }
+                // A playable bundle references real kit assets. The embedded
+                // primary picker is sufficient for offline CSG validation but
+                // must not authorize an export with a missing kit_path.
+                let picker = match self.catalog_for(&golden.kit_id) {
+                    Some(picker) => picker as &dyn ModulePicker,
+                    None => {
+                        let e = format!(
+                            "kit '{}' is unavailable for playable export; configure a content root with its socket catalog",
+                            golden.kit_id
+                        );
+                        return export_error_dict(&e);
+                    }
+                };
+                let allowed_floors = self.floor_modules_for(&golden.kit_id);
+                match layout_from_golden_with_picker(&golden, picker, allowed_floors) {
                     Err(e) => {
                         godot::global::godot_error!("DerelictAuthor.export_playable: {e}");
                         export_error_dict(&e)
@@ -390,6 +594,9 @@ impl DerelictAuthor {
                         let mut d = VarDictionary::new();
                         d.set("layout_json", layout.as_str());
                         d.set("gameplay_slice_json", slice.as_str());
+                        d.set("kit_id", golden.kit_id.as_str());
+                        d.set("layout_schema", "1.2.0");
+                        d.set("gameplay_schema", "1.1.0");
                         d.set("error", "");
                         d
                     }
@@ -414,10 +621,26 @@ impl DerelictAuthor {
     /// `DefaultModulePicker` constant for `kind`/`state`.
     #[func]
     fn legal_modules(&mut self, kind: GString, state: GString) -> PackedStringArray {
+        self.legal_modules_for_kit(kind, state, GString::from(PRIMARY_KIT))
+    }
+
+    /// Socket-filtered module ids for the document's resolved kit. The
+    /// two-argument method above remains the primary-kit compatibility API.
+    #[func]
+    fn legal_modules_for_kit(
+        &mut self,
+        kind: GString,
+        state: GString,
+        kit_id: GString,
+    ) -> PackedStringArray {
         self.ensure_palettes();
-        let sockets = &self.data.as_ref().expect("palettes initialized").sockets;
-        let catalog = (!sockets.modules.is_empty()).then_some(sockets);
-        let ids = legal_module_ids(catalog, &kind.to_string(), &state.to_string());
+        let kit_id = resolved_kit_id(kit_id.to_string().as_str()).to_string();
+        let catalog = self.catalog_for(&kit_id);
+        let ids = if catalog.is_some() || kit_id == PRIMARY_KIT {
+            legal_module_ids(catalog, &kind.to_string(), &state.to_string())
+        } else {
+            Vec::new()
+        };
         PackedStringArray::from_iter(ids.into_iter().map(|s| GString::from(s.as_str())))
     }
 }
@@ -433,14 +656,37 @@ fn load_golden_json(text: &str) -> Result<Value, String> {
         serde_json::from_str(text).map_err(|e| format!("failed to parse golden JSON: {e}"))?;
     coerce_golden_value(&mut value)?;
     // Round-trip through the DTO so the Dictionary is canonical.
-    let golden = golden_from_json(&value)?;
+    let mut golden = golden_from_json(&value)?;
+    normalize_room_vars_to_stable_ids(&mut golden);
     serde_json::to_value(&golden).map_err(|e| e.to_string())
+}
+
+fn normalize_room_vars_to_stable_ids(golden: &mut GoldenArea) {
+    for room in &golden.topology.rooms {
+        if golden.room_vars.contains_key(&room.stable_id) {
+            golden.room_vars.remove(&room.id.to_string());
+            continue;
+        }
+        if let Some(vars) = golden.room_vars.remove(&room.id.to_string()) {
+            golden.room_vars.insert(room.stable_id.clone(), vars);
+        }
+    }
 }
 
 fn error_dict(msg: &str) -> VarDictionary {
     let mut d = VarDictionary::new();
     d.set("error", msg);
     d
+}
+
+fn missing_kit_definition_error(loaded_ids: &BTreeSet<String>, kit_id: &str) -> Option<String> {
+    if loaded_ids.contains(kit_id) {
+        return None;
+    }
+    Some(format!(
+        "kit definition '{}' is unavailable for playable export; configure a content root containing its kit definition",
+        kit_id
+    ))
 }
 
 fn export_error_dict(msg: &str) -> VarDictionary {
@@ -732,12 +978,58 @@ fn zones_to_json(out: &CompileOut) -> Value {
 fn issues_array(issues: &[ValidationIssue]) -> VarArray {
     let mut arr = VarArray::new();
     for issue in issues {
+        let code = format!("{:?}", issue.code);
+        let (target_id, deck, cell) = diagnostic_location(&issue.detail);
         arr.push(&json_to_variant(&json!({
-            "code": format!("{:?}", issue.code),
+            "code": code,
+            "severity": "error",
+            "message": issue.detail,
             "detail": issue.detail,
+            "target_type": diagnostic_target_type(&code),
+            "target_id": target_id,
+            "deck": deck,
+            "cell": cell,
+            "repair_id": Value::Null,
         })));
     }
     arr
+}
+
+fn diagnostic_location(detail: &str) -> (String, Value, Value) {
+    for raw in detail.split_whitespace() {
+        let token = raw.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '|' && c != '-');
+        let parts: Vec<&str> = token.split('|').collect();
+        if parts.len() == 3 {
+            if let (Ok(deck), Ok(x), Ok(y)) = (
+                parts[0].parse::<i32>(),
+                parts[1].parse::<i32>(),
+                parts[2].parse::<i32>(),
+            ) {
+                return (token.to_string(), json!(deck), json!([x, y, deck]));
+            }
+        } else if parts.len() == 4 && matches!(parts[1], "h" | "v") {
+            if let (Ok(deck), Ok(y), Ok(x)) = (
+                parts[0].parse::<i32>(),
+                parts[2].parse::<i32>(),
+                parts[3].parse::<i32>(),
+            ) {
+                return (token.to_string(), json!(deck), json!([x, y, deck]));
+            }
+        }
+    }
+    (String::new(), Value::Null, Value::Null)
+}
+
+fn diagnostic_target_type(code: &str) -> &'static str {
+    if code.starts_with("Floor") || code.starts_with("Ceiling") {
+        "module"
+    } else if code.starts_with("Portal") || code.starts_with("Edge") {
+        "connection"
+    } else if code.starts_with("Occupancy") || code.starts_with("Reachability") {
+        "room"
+    } else {
+        "document"
+    }
 }
 
 fn stale_array(stale: &[StaleOverride]) -> VarArray {
@@ -748,10 +1040,19 @@ fn stale_array(stale: &[StaleOverride]) -> VarArray {
             StaleClass::Ceiling => "ceiling",
             StaleClass::Edge => "edge",
         };
+        let (_parsed_id, deck, cell) = diagnostic_location(&s.key);
         arr.push(&json_to_variant(&json!({
             "class": class,
             "key": s.key,
             "module_id": s.module_id,
+            "code": "StaleModuleOverride",
+            "severity": "warning",
+            "message": format!("{} override '{}' references unavailable module '{}'", class, s.key, s.module_id),
+            "target_type": "module_override",
+            "target_id": s.key,
+            "deck": deck,
+            "cell": cell,
+            "repair_id": "remove_stale_override",
         })));
     }
     arr
@@ -897,6 +1198,25 @@ fn dict_to_json(dict: &VarDictionary) -> Result<Value, String> {
     Ok(Value::Object(map))
 }
 
+fn array_variant_to_json(v: &Variant) -> Result<Value, String> {
+    if let Ok(arr) = v.try_to::<VarArray>() {
+        let mut out = Vec::new();
+        for x in arr.iter_shared() {
+            out.push(variant_to_json(&x)?);
+        }
+        return Ok(Value::Array(out));
+    }
+    // GDScript `Array[Dictionary]` is a typed array; godot-rust rejects it as VarArray.
+    if let Ok(arr) = v.try_to::<Array<VarDictionary>>() {
+        let mut out = Vec::new();
+        for d in arr.iter_shared() {
+            out.push(dict_to_json(&d)?);
+        }
+        return Ok(Value::Array(out));
+    }
+    Err(format!("cannot convert array to JSON: {v}"))
+}
+
 fn variant_key(key: &Variant) -> String {
     if let Ok(s) = key.try_to::<GString>() {
         return s.to_string();
@@ -929,14 +1249,7 @@ fn variant_to_json(v: &Variant) -> Result<Value, String> {
                 .map(|s| s.to_string())
                 .unwrap_or_default(),
         )),
-        VariantType::ARRAY => {
-            let arr: VarArray = v.try_to().map_err(|e| e.to_string())?;
-            let mut out = Vec::new();
-            for x in arr.iter_shared() {
-                out.push(variant_to_json(&x)?);
-            }
-            Ok(Value::Array(out))
-        }
+        VariantType::ARRAY => array_variant_to_json(v),
         VariantType::DICTIONARY => {
             let d: VarDictionary = v.try_to().map_err(|e| e.to_string())?;
             dict_to_json(&d)
@@ -1065,5 +1378,167 @@ mod tests {
             legal_module_ids(None, "floor", "bridge"),
             vec![FLOOR_MODULE.to_string()]
         );
+    }
+
+    #[test]
+    fn diagnostics_extract_floor_and_edge_targets() {
+        let floor = diagnostic_location("floor 2|-3|4 module 'bad'");
+        assert_eq!(floor.0, "2|-3|4");
+        assert_eq!(floor.1, json!(2));
+        assert_eq!(floor.2, json!([-3, 4, 2]));
+
+        let edge = diagnostic_location("required edge has no placement: 1|v|7|-2");
+        assert_eq!(edge.0, "1|v|7|-2");
+        assert_eq!(edge.1, json!(1));
+        assert_eq!(edge.2, json!([-2, 7, 1]));
+    }
+
+    #[test]
+    fn kit_catalog_lookup_fails_closed_for_unknown_kit() {
+        let palettes = AuthorPalettes::offline().expect("offline palettes");
+        let catalogs = BTreeMap::new();
+
+        // Legacy GoldenArea files omitted kit_id; they must resolve to the
+        // primary kit before catalog/picker and floor-policy compilation.
+        assert_eq!(resolved_kit_id(""), PRIMARY_KIT);
+        assert!(picker_for_loaded(Some(&palettes), &catalogs, "").is_ok());
+        assert!(catalog_for_loaded(Some(&palettes), &catalogs, "").is_none());
+
+        // The primary picker is an explicit offline-only compatibility policy;
+        // it does not masquerade as a loaded catalog that could authorize export.
+        assert!(picker_for_loaded(Some(&palettes), &catalogs, PRIMARY_KIT).is_ok());
+        assert!(catalog_for_loaded(Some(&palettes), &catalogs, PRIMARY_KIT).is_none());
+        assert!(picker_for_loaded(Some(&palettes), &catalogs, "missing_kit").is_err());
+        assert!(catalog_for_loaded(Some(&palettes), &catalogs, "missing_kit").is_none());
+    }
+
+    #[test]
+    fn playable_export_requires_loaded_kit_definition() {
+        let loaded = BTreeSet::from(["ship_structural_industrial".to_string()]);
+        assert!(missing_kit_definition_error(&loaded, "ship_structural_industrial").is_none());
+        let error = missing_kit_definition_error(&loaded, "ship_structural_hazard")
+            .expect("missing kit definition must block playable export");
+        assert!(error.contains("ship_structural_hazard"));
+        assert!(error.contains("configure a content root"));
+    }
+
+    #[test]
+    fn legal_modules_can_select_non_primary_kit_catalog() {
+        let palettes = AuthorPalettes::offline().expect("offline palettes");
+        let mut catalogs = BTreeMap::new();
+        let mut modules = BTreeMap::new();
+        modules.insert(
+            "edge_only_floor".to_string(),
+            derelict_core::structural::sockets::ModuleContract {
+                module_id: "edge_only_floor".to_string(),
+                module_family: String::new(),
+                sockets: vec![derelict_core::structural::sockets::SocketDef {
+                    id: "edge".to_string(),
+                    kind: "floor_edge".to_string(),
+                    position_m: [0.0; 3],
+                    compatible_kinds: Vec::new(),
+                }],
+            },
+        );
+        modules.insert(
+            "industrial_floor".to_string(),
+            derelict_core::structural::sockets::ModuleContract {
+                module_id: "industrial_floor".to_string(),
+                module_family: String::new(),
+                sockets: vec![
+                    derelict_core::structural::sockets::SocketDef {
+                        id: "edge".to_string(),
+                        kind: "floor_edge".to_string(),
+                        position_m: [0.0; 3],
+                        compatible_kinds: Vec::new(),
+                    },
+                    derelict_core::structural::sockets::SocketDef {
+                        id: "top".to_string(),
+                        kind: "floor_top".to_string(),
+                        position_m: [0.0; 3],
+                        compatible_kinds: Vec::new(),
+                    },
+                ],
+            },
+        );
+        modules.insert(
+            "top_only_floor".to_string(),
+            derelict_core::structural::sockets::ModuleContract {
+                module_id: "top_only_floor".to_string(),
+                module_family: String::new(),
+                sockets: vec![derelict_core::structural::sockets::SocketDef {
+                    id: "top".to_string(),
+                    kind: "floor_top".to_string(),
+                    position_m: [0.0; 3],
+                    compatible_kinds: Vec::new(),
+                }],
+            },
+        );
+        catalogs.insert(
+            "ship_structural_industrial".to_string(),
+            SocketCatalog { modules },
+        );
+
+        let complete_floor_ids: Vec<_> = catalogs["ship_structural_industrial"]
+            .modules
+            .values()
+            .filter(|module| has_complete_floor_sockets(module))
+            .map(|module| module.module_id.as_str())
+            .collect();
+        assert_eq!(complete_floor_ids, vec!["industrial_floor"]);
+
+        let catalog = catalog_for_loaded(Some(&palettes), &catalogs, "ship_structural_industrial")
+            .expect("non-primary catalog should resolve");
+        assert_eq!(floor_module_ids(catalog), vec!["industrial_floor"]);
+        assert_eq!(
+            legal_module_ids(Some(catalog), "floor", "bridge"),
+            vec!["industrial_floor"]
+        );
+        assert!(legal_module_ids(None, "floor", "bridge")
+            .iter()
+            .all(|id| id != "industrial_floor"));
+    }
+
+    #[test]
+    fn kit_without_complete_floor_module_never_falls_back_to_primary_defaults() {
+        let mut modules = BTreeMap::new();
+        modules.insert(
+            "edge_only_floor".to_string(),
+            derelict_core::structural::sockets::ModuleContract {
+                module_id: "edge_only_floor".to_string(),
+                module_family: String::new(),
+                sockets: vec![derelict_core::structural::sockets::SocketDef {
+                    id: "edge".to_string(),
+                    kind: "floor_edge".to_string(),
+                    position_m: [0.0; 3],
+                    compatible_kinds: Vec::new(),
+                }],
+            },
+        );
+        let catalog = SocketCatalog { modules };
+
+        // A selected kit with modules but no complete floor contract must
+        // produce an empty allowlist. Authorizing FLOOR_MODULES here would
+        // silently borrow modules from the primary kit.
+        assert!(floor_module_ids(&catalog).is_empty());
+    }
+
+    #[test]
+    fn compiled_plan_rejects_catalog_module_missing_from_kit_definition() {
+        let mut plan = StructuralPlan::default();
+        plan.occupancy.insert(
+            "0|0|0".to_string(),
+            derelict_core::structural::plan::CellRecord {
+                cell: derelict_core::structural::plan::Cell::new(0, 0, 0),
+                room_id: 1,
+                module_id: "catalog_only_floor".to_string(),
+                decal: 0,
+                variant: Default::default(),
+            },
+        );
+
+        let definition = BTreeSet::from(["defined_floor".to_string()]);
+        let missing = plan_modules_missing_from_kit_definition(&plan, &definition);
+        assert_eq!(missing, vec!["catalog_only_floor"]);
     }
 }

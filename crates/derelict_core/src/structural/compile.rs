@@ -266,10 +266,12 @@ pub fn compile(topology: &Topology, picker: &dyn ModulePicker) -> StructuralPlan
         edge_set_wrapper_required(edge);
     }
 
-    // --- 5. Vertex dressing: corners and T-junctions ------------------------
-    apply_vertex_modules(&mut plan, &room_by_cell, picker);
+    // Vertex modules are vertex-centered compound assets. They cannot safely
+    // replace an edge-centered wall record without a separate vertex placement
+    // position and orientation contract. Keep canonical SOLID edge placements
+    // as straight walls until that explicit vertex-placement IR exists.
 
-    // --- 6. Materialize placements (sorted by edge_key via BTreeMap) --------
+    // --- 5. Materialize placements (sorted by edge_key via BTreeMap) --------
     plan.placements = plan
         .edges
         .values()
@@ -277,7 +279,7 @@ pub fn compile(topology: &Topology, picker: &dyn ModulePicker) -> StructuralPlan
         .cloned()
         .collect();
 
-    // --- 7. Socket bindings (geometric adjacency) ---------------------------
+    // --- 6. Socket bindings (geometric adjacency) ---------------------------
     emit_socket_bindings(&mut plan);
 
     plan
@@ -289,97 +291,6 @@ fn wrapper_required(e: &EdgeRecord) -> bool {
 
 pub(crate) fn edge_set_wrapper_required(e: &mut EdgeRecord) {
     e.wrapper_required = e.kind != EdgeKind::Open && !e.module_id.is_empty();
-}
-
-/// Corner/T-junction dressing, ported from `_apply_vertex_modules`: for
-/// every grid vertex of every occupied cell, count surrounding occupied
-/// cells and surrounding SOLID edges; upgrade one plain wall's module.
-fn apply_vertex_modules(
-    plan: &mut StructuralPlan,
-    room_by_cell: &BTreeMap<String, RoomId>,
-    picker: &dyn ModulePicker,
-) {
-    let mut visited: BTreeSet<(u8, i32, i32)> = BTreeSet::new();
-    let occupied: Vec<Cell> = plan.occupancy.values().map(|r| r.cell).collect();
-    for cell in occupied {
-        // The four vertices of this cell: (x,y), (x+1,y), (x,y+1), (x+1,y+1).
-        for (vx, vy) in [
-            (cell.x, cell.y),
-            (cell.x + 1, cell.y),
-            (cell.x, cell.y + 1),
-            (cell.x + 1, cell.y + 1),
-        ] {
-            if !visited.insert((cell.deck, vx, vy)) {
-                continue;
-            }
-            // The 4 cells around this vertex.
-            let around = [
-                Cell::new(cell.deck, vx - 1, vy - 1),
-                Cell::new(cell.deck, vx, vy - 1),
-                Cell::new(cell.deck, vx - 1, vy),
-                Cell::new(cell.deck, vx, vy),
-            ];
-            let occupied_count = around
-                .iter()
-                .filter(|c| room_by_cell.contains_key(&c.key()))
-                .count();
-            // The 4 candidate edges meeting at this vertex.
-            let vertex_edges = [
-                edge_key(Cell::new(cell.deck, vx - 1, vy - 1), Dir::East), // above, vertical
-                edge_key(Cell::new(cell.deck, vx - 1, vy), Dir::East),     // below, vertical
-                edge_key(Cell::new(cell.deck, vx - 1, vy - 1), Dir::South), // left, horizontal
-                edge_key(Cell::new(cell.deck, vx, vy - 1), Dir::South),    // right, horizontal
-            ];
-            let solid_keys: Vec<String> = vertex_edges
-                .iter()
-                .filter(|k| {
-                    plan.edges
-                        .get(k.as_str())
-                        .map(|e| e.kind == EdgeKind::Solid)
-                        .unwrap_or(false)
-                })
-                .cloned()
-                .collect();
-
-            let vertex_kind = if solid_keys.len() >= 3 {
-                Some(VertexKind::TJunction)
-            } else if occupied_count == 3 && solid_keys.len() >= 2 {
-                Some(VertexKind::InnerCorner)
-            } else if occupied_count == 1 && solid_keys.len() >= 2 {
-                Some(VertexKind::OuterCorner)
-            } else {
-                None
-            };
-            let Some(vk) = vertex_kind else { continue };
-            let Some(module) = picker.vertex(vk) else {
-                continue;
-            };
-            // First replaceable wall: non-portal solid edge still carrying
-            // the plain wall module (else any non-portal solid edge).
-            let target = solid_keys
-                .iter()
-                .find(|k| {
-                    plan.edges
-                        .get(k.as_str())
-                        .map(|e| !e.portal && e.module_id == WALL_MODULE)
-                        .unwrap_or(false)
-                })
-                .or_else(|| {
-                    solid_keys.iter().find(|k| {
-                        plan.edges
-                            .get(k.as_str())
-                            .map(|e| !e.portal)
-                            .unwrap_or(false)
-                    })
-                })
-                .cloned();
-            if let Some(key) = target {
-                if let Some(e) = plan.edges.get_mut(&key) {
-                    e.module_id = module;
-                }
-            }
-        }
-    }
 }
 
 /// Geometric socket bindings: every floor binds to its adjacent materialized
