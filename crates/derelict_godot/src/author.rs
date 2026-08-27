@@ -82,11 +82,19 @@ impl DerelictAuthor {
     }
 
     fn catalog_for(&self, kit_id: &str) -> Option<&SocketCatalog> {
-        catalog_for_loaded(self.data.as_ref(), &self.sockets_by_kit, kit_id)
+        catalog_for_loaded(
+            self.data.as_ref(),
+            &self.sockets_by_kit,
+            resolved_kit_id(kit_id),
+        )
     }
 
     fn picker_for(&self, kit_id: &str) -> Result<&dyn ModulePicker, String> {
-        picker_for_loaded(self.data.as_ref(), &self.sockets_by_kit, kit_id)
+        picker_for_loaded(
+            self.data.as_ref(),
+            &self.sockets_by_kit,
+            resolved_kit_id(kit_id),
+        )
     }
 
     fn floor_modules_for(&self, kit_id: &str) -> Option<Vec<String>> {
@@ -139,11 +147,23 @@ fn has_complete_floor_sockets(module: &derelict_core::structural::sockets::Modul
         && module.sockets.iter().any(|s| s.kind == "floor_top")
 }
 
+/// GoldenArea documents created before kits were persisted have an empty
+/// `kit_id`. Keep that legacy representation readable while resolving it at
+/// every kit-aware bridge boundary.
+fn resolved_kit_id(kit_id: &str) -> &str {
+    if kit_id.is_empty() {
+        PRIMARY_KIT
+    } else {
+        kit_id
+    }
+}
+
 fn catalog_for_loaded<'a>(
     data: Option<&'a AuthorPalettes>,
     sockets_by_kit: &'a BTreeMap<String, SocketCatalog>,
     kit_id: &str,
 ) -> Option<&'a SocketCatalog> {
+    let kit_id = resolved_kit_id(kit_id);
     sockets_by_kit
         .get(kit_id)
         .filter(|c| !c.modules.is_empty())
@@ -159,6 +179,7 @@ fn picker_for_loaded<'a>(
     sockets_by_kit: &'a BTreeMap<String, SocketCatalog>,
     kit_id: &str,
 ) -> Result<&'a dyn ModulePicker, String> {
+    let kit_id = resolved_kit_id(kit_id);
     if let Some(catalog) = catalog_for_loaded(data, sockets_by_kit, kit_id) {
         return Ok(catalog);
     }
@@ -408,15 +429,20 @@ impl DerelictAuthor {
                 export_error_dict(&e)
             }
             Ok(golden) => {
-                let kit = kit_id.to_string();
-                if kit != golden.kit_id {
+                let requested_kit = resolved_kit_id(kit_id.to_string().as_str()).to_string();
+                let document_kit = resolved_kit_id(&golden.kit_id).to_string();
+                if requested_kit != document_kit {
                     let e = format!(
                         "kit mismatch: export argument '{}' must match GoldenArea kit_id '{}'",
-                        kit, golden.kit_id
+                        kit_id, golden.kit_id
                     );
                     godot::global::godot_error!("DerelictAuthor.export_playable: {e}");
                     return export_error_dict(&e);
                 }
+                // Compile/export the canonical kit id so legacy documents use
+                // the same catalog, picker, and floor policy as new ones.
+                let mut golden = golden;
+                golden.kit_id = document_kit;
                 if let Some(e) =
                     missing_kit_definition_error(&self.kit_definition_ids, &golden.kit_id)
                 {
@@ -517,7 +543,7 @@ impl DerelictAuthor {
         kit_id: GString,
     ) -> PackedStringArray {
         self.ensure_palettes();
-        let kit_id = kit_id.to_string();
+        let kit_id = resolved_kit_id(kit_id.to_string().as_str()).to_string();
         let catalog = self.catalog_for(&kit_id);
         let ids = if catalog.is_some() || kit_id == PRIMARY_KIT {
             legal_module_ids(catalog, &kind.to_string(), &state.to_string())
@@ -1280,6 +1306,12 @@ mod tests {
     fn kit_catalog_lookup_fails_closed_for_unknown_kit() {
         let palettes = AuthorPalettes::offline().expect("offline palettes");
         let catalogs = BTreeMap::new();
+
+        // Legacy GoldenArea files omitted kit_id; they must resolve to the
+        // primary kit before catalog/picker and floor-policy compilation.
+        assert_eq!(resolved_kit_id(""), PRIMARY_KIT);
+        assert!(picker_for_loaded(Some(&palettes), &catalogs, "").is_ok());
+        assert!(catalog_for_loaded(Some(&palettes), &catalogs, "").is_none());
 
         // The primary picker is an explicit offline-only compatibility policy;
         // it does not masquerade as a loaded catalog that could authorize export.

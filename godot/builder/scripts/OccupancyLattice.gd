@@ -489,6 +489,12 @@ func _parse_hydrated_hazards(value: Variant, stable_ids: Dictionary, occupancy: 
 				return {"error": "hazard ids must be non-empty and unique"}
 			if not stable_ids.has(from_room) or not stable_ids.has(to_room):
 				return {"error": "hazard %s references an unknown room" % zone_id}
+			# Interactive authoring only produces collapsed same-cell markers
+			# (for an occupied cell adjacent to void) or cardinal, same-deck
+			# links. Keep hydration aligned so hand-authored JSON cannot create
+			# runtime hazard geometry the builder itself could never produce.
+			if from_cell != to_cell and not _is_cardinal(from_cell, to_cell):
+				return {"error": "hazard %s endpoints must be cardinal neighbors on the same deck" % zone_id}
 			if not occupancy.has(_key(from_cell)):
 				return {"error": "hazard %s references an unoccupied cell" % zone_id}
 			if int(occupancy.get(_key(from_cell), 0)) != int(stable_ids.get(from_room, 0)):

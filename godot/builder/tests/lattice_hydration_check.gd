@@ -103,7 +103,7 @@ func _check_exterior_hazard_hydration() -> void:
 		if hazards.size() != 1 or (hazards[0].get("to_cell", []) as Array) != [1, 0, 0]:
 			_fail("exterior hazard endpoint was not preserved")
 	var unrelated: Dictionary = document.duplicate(true)
-	(unrelated["hazards"]["fire_zones"] as Array)[0]["to_cell"] = [2, 0, 0]
+	(unrelated["hazards"]["fire_zones"] as Array)[0]["to_cell"] = [-1, 0, 0]
 	var rejected: Dictionary = lattice.hydrate_document(unrelated)
 	if not str(rejected.get("error", "")).contains("unoccupied cell"):
 		_fail("unrelated void hazard should be rejected")
@@ -120,6 +120,16 @@ func _check_exterior_hazard_hydration() -> void:
 		var owned_result: Dictionary = lattice.hydrate_document(owned_mismatch)
 		if not str(owned_result.get("error", "")).contains("from_room does not own"):
 			_fail("hazard with mismatched occupied from_cell should be rejected")
+	var distant: Dictionary = document.duplicate(true)
+	(distant["hazards"]["fire_zones"] as Array)[0]["to_cell"] = [4, 0, 0]
+	var distant_result: Dictionary = lattice.hydrate_document(distant)
+	if not str(distant_result.get("error", "")).contains("cardinal neighbors"):
+		_fail("distant hazard endpoints should be rejected during hydration")
+	var different_deck: Dictionary = document.duplicate(true)
+	(different_deck["hazards"]["fire_zones"] as Array)[0]["to_cell"] = [2, 0, 1]
+	var different_deck_result: Dictionary = lattice.hydrate_document(different_deck)
+	if not str(different_deck_result.get("error", "")).contains("same deck"):
+		_fail("cross-deck hazard endpoints should be rejected during hydration")
 	lattice.free()
 	print("EXTERIOR_HAZARD_OK hydration preserves portal-aligned void endpoint")
 
@@ -206,8 +216,8 @@ func _representative_document() -> Dictionary:
 			}],
 			"breach_zones": [], "arc_zones": [],
 			"radiation_zones": [{
-				"id": "radiation_11", "from_room": "airlock_alpha", "to_room": "engineering_upper",
-				"from_cell": [0, 0, 0], "to_cell": [0, 0, 1], "module_id": "", "kind": "radiation",
+				"id": "radiation_11", "from_room": "airlock_alpha", "to_room": "airlock_alpha",
+				"from_cell": [0, 0, 0], "to_cell": [0, 0, 0], "module_id": "", "kind": "radiation",
 				"compartment_id": "", "rationale": "test radiation",
 			}],
 		},
