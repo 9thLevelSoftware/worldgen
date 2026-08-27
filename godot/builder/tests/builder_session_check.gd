@@ -62,6 +62,14 @@ func _check_save_reopen(session, golden: Dictionary) -> void:
 func _check_recovery(session, golden: Dictionary) -> void:
 	var changed := golden.duplicate(true)
 	changed["display_name"] = "Recovered Session"
+	# Discard must cancel a scheduled write even when the debounce has not
+	# created a recovery file yet.
+	session.start_new(golden)
+	session.commit_document(changed, "Pending recovery edit")
+	_expect(not session.has_recovery(), "pending recovery has no snapshot yet")
+	_expect(not session.discard_recovery(), "discard reports no existing snapshot")
+	session._recovery_timer.timeout.emit()
+	_expect(not session.has_recovery(), "discarded pending recovery is not recreated")
 	session.start_new(golden)
 	session.commit_document(changed, "Recovery edit")
 	var flushed: Dictionary = session.flush_recovery_for_test()

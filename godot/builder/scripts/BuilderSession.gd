@@ -215,14 +215,15 @@ func restore_recovery() -> Dictionary:
 	return {"ok": true, "document": source_document, "path": recovery_path()}
 
 func discard_recovery() -> bool:
-	if not has_recovery():
+	var had_recovery := has_recovery()
+	_recovery_pending = false
+	_stop_recovery_timer()
+	if not had_recovery:
 		return false
 	var err := DirAccess.remove_absolute(ProjectSettings.globalize_path(recovery_path()))
 	if err != OK:
 		session_error.emit("Unable to discard recovery snapshot")
 		return false
-	_recovery_pending = false
-	_stop_recovery_timer()
 	return true
 
 func flush_recovery_for_test() -> Dictionary:
