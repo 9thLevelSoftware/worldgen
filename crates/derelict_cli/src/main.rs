@@ -294,6 +294,13 @@ fn author_golden(path: &str) -> Result<AuthorResult, String> {
 }
 
 fn author_golden_doc(golden: GoldenArea) -> Result<AuthorResult, String> {
+    let default_kit = derelict_core::structural::export::ExportOptions::default().kit_id;
+    if golden.kit_id != default_kit {
+        return Err(format!(
+            "kit '{}' is unavailable to the standalone CLI; use a kit-aware authoring bridge",
+            golden.kit_id
+        ));
+    }
     let topology = golden.to_topology()?;
     let (plan, stale) = compile_authored(&topology, &DefaultModulePicker, &golden.module_overrides);
     let mut issues = Vec::new();
@@ -732,6 +739,15 @@ mod tests {
             "issues: {:?}",
             result.issues
         );
+    }
+
+    #[test]
+    fn author_validate_rejects_unresolved_non_default_kit() {
+        let mut golden = sample();
+        golden.kit_id = "missing_runtime_kit".into();
+        let err = author_golden_doc(golden)
+            .expect_err("CLI must not use the default picker for another kit");
+        assert!(err.contains("missing_runtime_kit"), "{err}");
     }
 
     #[test]

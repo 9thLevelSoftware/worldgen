@@ -7,7 +7,7 @@
 
 use derelict_core::authoring::{GoldenArea, RoomVars};
 use derelict_core::structural::compile::{DefaultModulePicker, ModulePicker, VertexKind};
-use derelict_core::structural::export::layout_from_golden_with_picker;
+use derelict_core::structural::export::{layout_from_golden, layout_from_golden_with_picker};
 use derelict_core::structural::plan::EdgeKind;
 use serde_json::Value;
 
@@ -77,6 +77,18 @@ fn custom_kit_floor_requires_matching_allowlist() {
     assert!(placements
         .iter()
         .all(|placement| { placement["module_id"].as_str() == Some(CUSTOM_FLOOR) }));
+}
+
+#[test]
+fn compatibility_export_rejects_unresolved_non_default_kit() {
+    let mut golden = sample();
+    golden.kit_id = "missing_runtime_kit".into();
+    let err =
+        layout_from_golden(&golden).expect_err("default export must not stamp an unresolved kit");
+    assert!(
+        err.contains("layout_from_golden_with_picker"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]

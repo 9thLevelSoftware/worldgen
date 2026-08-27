@@ -80,22 +80,11 @@ impl DerelictAuthor {
     }
 
     fn catalog_for(&self, kit_id: &str) -> Option<&SocketCatalog> {
-        self.sockets_by_kit
-            .get(kit_id)
-            .filter(|c| !c.modules.is_empty())
-            .or_else(|| {
-                self.data
-                    .as_ref()
-                    .map(|p| &p.sockets)
-                    .filter(|c| !c.modules.is_empty())
-            })
+        catalog_for_loaded(self.data.as_ref(), &self.sockets_by_kit, kit_id)
     }
 
-    fn picker_for(&self, kit_id: &str) -> &dyn ModulePicker {
-        match self.catalog_for(kit_id) {
-            Some(catalog) => catalog,
-            None => &DefaultModulePicker,
-        }
+    fn picker_for(&self, kit_id: &str) -> Result<&dyn ModulePicker, String> {
+        picker_for_loaded(self.data.as_ref(), &self.sockets_by_kit, kit_id)
     }
 
     fn floor_modules_for(&self, kit_id: &str) -> Option<Vec<String>> {
@@ -120,7 +109,7 @@ impl DerelictAuthor {
 
     fn compile_golden(&self, golden: &GoldenArea) -> Result<CompileOut, String> {
         let topology = golden.to_topology()?;
-        let picker = self.picker_for(&golden.kit_id);
+        let picker = self.picker_for(&golden.kit_id)?;
         let (plan, stale) = compile_authored(&topology, picker, &golden.module_overrides);
         let mut issues = Vec::new();
         match author_policy(golden, &topology) {
@@ -145,6 +134,40 @@ impl DerelictAuthor {
             golden_ids: golden.room_stable_ids(),
         })
     }
+}
+
+fn catalog_for_loaded<'a>(
+    data: Option<&'a AuthorPalettes>,
+    sockets_by_kit: &'a BTreeMap<String, SocketCatalog>,
+    kit_id: &str,
+) -> Option<&'a SocketCatalog> {
+    sockets_by_kit
+        .get(kit_id)
+        .filter(|c| !c.modules.is_empty())
+        .or_else(|| {
+            data.filter(|p| p.kit.kit_id == kit_id)
+                .map(|p| &p.sockets)
+                .filter(|c| !c.modules.is_empty())
+        })
+}
+
+fn picker_for_loaded<'a>(
+    data: Option<&'a AuthorPalettes>,
+    sockets_by_kit: &'a BTreeMap<String, SocketCatalog>,
+    kit_id: &str,
+) -> Result<&'a dyn ModulePicker, String> {
+    if let Some(catalog) = catalog_for_loaded(data, sockets_by_kit, kit_id) {
+        return Ok(catalog);
+    }
+    // Offline authoring explicitly supports the embedded primary-kit picker
+    // for CSG preview and validation. Other kit IDs must never borrow it.
+    if kit_id == PRIMARY_KIT {
+        return Ok(&DefaultModulePicker);
+    }
+    Err(format!(
+        "kit '{}' is unavailable or has no loaded socket catalog",
+        kit_id
+    ))
 }
 
 struct CompileOut {
@@ -411,7 +434,19 @@ impl DerelictAuthor {
                         .join("\n");
                     return export_error_dict(&e);
                 }
-                let picker = self.picker_for(&golden.kit_id);
+                // A playable bundle references real kit assets. The embedded
+                // primary picker is sufficient for offline CSG validation but
+                // must not authorize an export with a missing kit_path.
+                let picker = match self.catalog_for(&golden.kit_id) {
+                    Some(picker) => picker as &dyn ModulePicker,
+                    None => {
+                        let e = format!(
+                            "kit '{}' is unavailable for playable export; configure a content root with its socket catalog",
+                            golden.kit_id
+                        );
+                        return export_error_dict(&e);
+                    }
+                };
                 let allowed_floors = self.floor_modules_for(&golden.kit_id);
                 match layout_from_golden_with_picker(&golden, picker, allowed_floors) {
                     Err(e) => {
@@ -1197,5 +1232,18 @@ mod tests {
         assert_eq!(edge.0, "1|v|7|-2");
         assert_eq!(edge.1, json!(1));
         assert_eq!(edge.2, json!([7, -2, 1]));
+    }
+
+    #[test]
+    fn kit_catalog_lookup_fails_closed_for_unknown_kit() {
+        let palettes = AuthorPalettes::offline().expect("offline palettes");
+        let catalogs = BTreeMap::new();
+
+        // The primary picker is an explicit offline-only compatibility policy;
+        // it does not masquerade as a loaded catalog that could authorize export.
+        assert!(picker_for_loaded(Some(&palettes), &catalogs, PRIMARY_KIT).is_ok());
+        assert!(catalog_for_loaded(Some(&palettes), &catalogs, PRIMARY_KIT).is_none());
+        assert!(picker_for_loaded(Some(&palettes), &catalogs, "missing_kit").is_err());
+        assert!(catalog_for_loaded(Some(&palettes), &catalogs, "missing_kit").is_none());
     }
 }

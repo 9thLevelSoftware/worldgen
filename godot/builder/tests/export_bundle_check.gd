@@ -24,6 +24,7 @@ func _run_checks() -> void:
 		_finish()
 		return
 	var document: Dictionary = app.author.load_golden(file.get_as_text())
+	_check_unknown_kit_rejected(app.author, document)
 	app._session.start_new(document)
 	if not app._apply_source_document(document):
 		_fail("fixture hydration failed")
@@ -42,6 +43,25 @@ func _run_checks() -> void:
 	await process_frame
 	_cleanup()
 	_finish()
+
+
+func _check_unknown_kit_rejected(author: Object, document: Dictionary) -> void:
+	var unknown := document.duplicate(true)
+	unknown["kit_id"] = "missing_runtime_kit"
+	for operation in [
+		["compile", author.compile(unknown)],
+		["validate", author.validate(unknown)],
+		["export", author.export_playable(unknown, "missing_runtime_kit")],
+	]:
+		var result: Dictionary = operation[1]
+		var error := str(result.get("error", ""))
+		if error.is_empty() or not error.contains("missing_runtime_kit"):
+			_fail("%s silently accepted an unavailable kit: %s" % [operation[0], result])
+	var offline_author = ClassDB.instantiate("DerelictAuthor")
+	offline_author.set_content_root("")
+	var offline_export: Dictionary = offline_author.export_playable(document, str(document.get("kit_id", "")))
+	if not str(offline_export.get("error", "")).contains("configure a content root"):
+		_fail("offline playable export did not require a resolved kit catalog: %s" % offline_export)
 
 
 func _check_bundle(app: Node) -> void:
