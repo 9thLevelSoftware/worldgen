@@ -133,11 +133,36 @@ func _run_checks() -> void:
 	if invoked["value"] or not app._unsaved_dialog.visible:
 		_fail("unsaved guard did not pause the destructive action")
 	app._unsaved_dialog.hide()
+	# A failed guarded Save must abandon the deferred destructive action. A
+	# later successful Save As must never revive an old New/Open/Quit request.
+	app._session.source_path = SOURCE_PATH.get_base_dir()
+	app._on_unsaved_action(&"save")
+	if invoked["value"] or app._continue_after_save or app._pending_destructive_action.is_valid():
+		_fail("failed guarded save left a stale destructive continuation")
+	app._guard_unsaved(func() -> void: invoked["value"] = true)
+	if invoked["value"] or not app._unsaved_dialog.visible:
+		_fail("unsaved guard did not recover after a failed guarded save")
+	app._unsaved_dialog.hide()
 
 	# Recovery is automatic after the debounce, not dependent on a clean close.
 	await create_timer(0.9).timeout
 	if not FileAccess.file_exists(RECOVERY_PATH):
 		_fail("debounced recovery snapshot was not written")
+	# ConfirmationDialog hides before emitting confirmed on Godot 4.7. A
+	# builder-invalid recovery must reopen the dialog so retry/discard remains
+	# available without restarting the application.
+	var invalid_recovery: Dictionary = app._session.source_document.duplicate(true)
+	invalid_recovery["topology"]["rooms"][0]["cells"] = [[100, 0]]
+	var recovery_file := FileAccess.open(RECOVERY_PATH, FileAccess.WRITE)
+	recovery_file.store_string(app.author.save_golden(invalid_recovery))
+	recovery_file.close()
+	app._recovery_dialog.hide()
+	app._restore_recovery()
+	await process_frame
+	await process_frame
+	if not app._recovery_dialog.visible:
+		_fail("failed recovery did not keep retry/discard available")
+	app._recovery_dialog.hide()
 	app._discard_and_continue_destructive_action()
 	if not bool(invoked["value"]) or FileAccess.file_exists(RECOVERY_PATH):
 		_fail("discard did not continue the action and remove recovery data")

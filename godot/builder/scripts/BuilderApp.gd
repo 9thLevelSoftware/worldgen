@@ -222,7 +222,7 @@ func _configure_document_actions() -> void:
 	_save_dialog.current_file = "untitled.golden_area.json"
 	_save_dialog.min_size = Vector2i(760, 460)
 	_save_dialog.file_selected.connect(_save_document_as)
-	_save_dialog.canceled.connect(func() -> void: _continue_after_save = false)
+	_save_dialog.canceled.connect(_cancel_deferred_destructive_action)
 	add_child(_save_dialog)
 
 	_unsaved_dialog = ConfirmationDialog.new()
@@ -237,6 +237,11 @@ func _configure_document_actions() -> void:
 	_recovery_dialog = ConfirmationDialog.new()
 	_recovery_dialog.title = "Recover unsaved work"
 	_recovery_dialog.dialog_text = "A recovery snapshot from an earlier session is available."
+	# Godot 4.7 does not expose AcceptDialog.dialog_close_on_ok yet, while
+	# newer runtimes do. Use the native property when available and re-open
+	# after a failed restore as the compatibility fallback.
+	if _has_property(_recovery_dialog, &"dialog_close_on_ok"):
+		_recovery_dialog.set(&"dialog_close_on_ok", false)
 	_recovery_dialog.ok_button_text = "Restore"
 	_recovery_dialog.add_button("Discard", true, "discard")
 	_recovery_dialog.confirmed.connect(_restore_recovery)
@@ -244,6 +249,13 @@ func _configure_document_actions() -> void:
 	add_child(_recovery_dialog)
 	%RunGameBtn.pressed.connect(_on_run_game_pressed)
 	_update_run_game_state()
+
+
+func _has_property(object: Object, property_name: StringName) -> bool:
+	for property: Dictionary in object.get_property_list():
+		if str(property.get("name", "")) == str(property_name):
+			return true
+	return false
 
 
 func _configure_session() -> void:
@@ -281,9 +293,14 @@ func _guard_unsaved(action: Callable) -> void:
 
 func _continue_destructive_action() -> void:
 	var action := _pending_destructive_action
-	_pending_destructive_action = Callable()
+	_cancel_deferred_destructive_action()
 	if action.is_valid():
 		action.call()
+
+
+func _cancel_deferred_destructive_action() -> void:
+	_pending_destructive_action = Callable()
+	_continue_after_save = false
 
 
 func _discard_and_continue_destructive_action() -> void:
@@ -303,8 +320,9 @@ func _on_unsaved_action(action: StringName) -> void:
 	_commit_session_document("Save before continuing")
 	var result: Dictionary = _session.save_document()
 	if bool(result.get("ok", false)):
-		_continue_after_save = false
 		_continue_destructive_action()
+	else:
+		_cancel_deferred_destructive_action()
 
 
 func _new_document() -> void:
@@ -348,8 +366,9 @@ func _save_document_as(path: String) -> void:
 	if bool(result.get("ok", false)):
 		_status.text = "Saved %s" % path
 		if _continue_after_save:
-			_continue_after_save = false
 			_continue_destructive_action()
+	else:
+		_cancel_deferred_destructive_action()
 
 
 func _undo_document() -> void:
@@ -371,6 +390,8 @@ func _restore_recovery() -> void:
 	if bool(result.get("ok", false)):
 		_recovery_dialog.hide()
 		_status.text = "Recovered unsaved work. Save it to keep the recovered document."
+	else:
+		_recovery_dialog.call_deferred("popup_centered")
 
 
 func _on_recovery_action(action: StringName) -> void:
