@@ -94,3 +94,14 @@ fn furniture_and_container_placement_identity_survive_export() {
         .iter()
         .any(|entry| entry["approach_cell"] == serde_json::json!([0, 0, 0])));
 }
+
+#[test]
+fn duplicate_authored_prop_ids_are_rejected_before_export_projection() {
+    let mut golden = sample();
+    let mut duplicate = golden.props[0].clone();
+    duplicate.cell = [1, 1, 0];
+    golden.props.push(duplicate);
+
+    let err = layout_from_golden(&golden).expect_err("duplicate prop IDs must fail export");
+    assert!(err.contains("duplicate prop id"), "unexpected error: {err}");
+}

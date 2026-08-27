@@ -339,7 +339,11 @@ impl GoldenArea {
                 self.deck_height_m
             ));
         }
+        let mut prop_ids = BTreeSet::new();
         for prop in &self.props {
+            if !prop_ids.insert(prop.id) {
+                return Err(format!("duplicate prop id {}", prop.id));
+            }
             if prop.kind == EntityKind::Door {
                 return Err(format!(
                     "prop {} has kind Door; doors are implied by portals",
