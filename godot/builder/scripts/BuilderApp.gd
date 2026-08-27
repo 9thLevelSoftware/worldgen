@@ -1086,7 +1086,7 @@ func _bind_module_sel(sel: Dictionary) -> void:
 	_preview.highlight_selection(layer, str(next.get("key", "")))
 	var legal := PackedStringArray()
 	if author != null and str(next.get("kind", "")) != "":
-		legal = author.legal_modules(str(next["kind"]), str(next.get("state", "")))
+		legal = author.legal_modules_for_kit(str(next["kind"]), str(next.get("state", "")), _kit_id)
 	_inspector.bind_module(next, legal)
 
 
@@ -1165,7 +1165,7 @@ func _enrich_module_sel(sel: Dictionary) -> Dictionary:
 			next["assignable"] = false
 	var preferred := PackedStringArray()
 	if author != null:
-		preferred = author.legal_modules(str(next.get("kind", "")), str(next.get("state", "")))
+		preferred = author.legal_modules_for_kit(str(next.get("kind", "")), str(next.get("state", "")), _kit_id)
 	if not preferred.is_empty():
 		next["default_id"] = preferred[0]
 	return next

@@ -488,10 +488,26 @@ impl DerelictAuthor {
     /// `DefaultModulePicker` constant for `kind`/`state`.
     #[func]
     fn legal_modules(&mut self, kind: GString, state: GString) -> PackedStringArray {
+        self.legal_modules_for_kit(kind, state, GString::from(PRIMARY_KIT))
+    }
+
+    /// Socket-filtered module ids for the document's resolved kit. The
+    /// two-argument method above remains the primary-kit compatibility API.
+    #[func]
+    fn legal_modules_for_kit(
+        &mut self,
+        kind: GString,
+        state: GString,
+        kit_id: GString,
+    ) -> PackedStringArray {
         self.ensure_palettes();
-        let sockets = &self.data.as_ref().expect("palettes initialized").sockets;
-        let catalog = (!sockets.modules.is_empty()).then_some(sockets);
-        let ids = legal_module_ids(catalog, &kind.to_string(), &state.to_string());
+        let kit_id = kit_id.to_string();
+        let catalog = self.catalog_for(&kit_id);
+        let ids = if catalog.is_some() || kit_id == PRIMARY_KIT {
+            legal_module_ids(catalog, &kind.to_string(), &state.to_string())
+        } else {
+            Vec::new()
+        };
         PackedStringArray::from_iter(ids.into_iter().map(|s| GString::from(s.as_str())))
     }
 }
@@ -849,7 +865,7 @@ fn diagnostic_location(detail: &str) -> (String, Value, Value) {
                 return (token.to_string(), json!(deck), json!([x, y, deck]));
             }
         } else if parts.len() == 4 && matches!(parts[1], "h" | "v") {
-            if let (Ok(deck), Ok(x), Ok(y)) = (
+            if let (Ok(deck), Ok(y), Ok(x)) = (
                 parts[0].parse::<i32>(),
                 parts[2].parse::<i32>(),
                 parts[3].parse::<i32>(),
@@ -1231,7 +1247,7 @@ mod tests {
         let edge = diagnostic_location("required edge has no placement: 1|v|7|-2");
         assert_eq!(edge.0, "1|v|7|-2");
         assert_eq!(edge.1, json!(1));
-        assert_eq!(edge.2, json!([7, -2, 1]));
+        assert_eq!(edge.2, json!([-2, 7, 1]));
     }
 
     #[test]
@@ -1245,5 +1261,47 @@ mod tests {
         assert!(catalog_for_loaded(Some(&palettes), &catalogs, PRIMARY_KIT).is_none());
         assert!(picker_for_loaded(Some(&palettes), &catalogs, "missing_kit").is_err());
         assert!(catalog_for_loaded(Some(&palettes), &catalogs, "missing_kit").is_none());
+    }
+
+    #[test]
+    fn legal_modules_can_select_non_primary_kit_catalog() {
+        let palettes = AuthorPalettes::offline().expect("offline palettes");
+        let mut catalogs = BTreeMap::new();
+        let mut modules = BTreeMap::new();
+        modules.insert(
+            "industrial_floor".to_string(),
+            derelict_core::structural::sockets::ModuleContract {
+                module_id: "industrial_floor".to_string(),
+                module_family: String::new(),
+                sockets: vec![
+                    derelict_core::structural::sockets::SocketDef {
+                        id: "edge".to_string(),
+                        kind: "floor_edge".to_string(),
+                        position_m: [0.0; 3],
+                        compatible_kinds: Vec::new(),
+                    },
+                    derelict_core::structural::sockets::SocketDef {
+                        id: "top".to_string(),
+                        kind: "floor_top".to_string(),
+                        position_m: [0.0; 3],
+                        compatible_kinds: Vec::new(),
+                    },
+                ],
+            },
+        );
+        catalogs.insert(
+            "ship_structural_industrial".to_string(),
+            SocketCatalog { modules },
+        );
+
+        let catalog = catalog_for_loaded(Some(&palettes), &catalogs, "ship_structural_industrial")
+            .expect("non-primary catalog should resolve");
+        assert_eq!(
+            legal_module_ids(Some(catalog), "floor", "bridge"),
+            vec!["industrial_floor"]
+        );
+        assert!(legal_module_ids(None, "floor", "bridge")
+            .iter()
+            .all(|id| id != "industrial_floor"));
     }
 }
