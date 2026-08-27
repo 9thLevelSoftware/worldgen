@@ -1374,6 +1374,24 @@ func _run_compile() -> void:
 		_set_phase2_ready(false)
 		return
 	var result: Dictionary = author.compile(golden)
+	# Compile once to establish the current plan, then remove overrides that no
+	# longer have a target (for example a ceiling hidden by a new vertical).
+	# The cleanup is a normal session commit so it is visible and undoable.
+	if result.has("error"):
+		_show_issues([{"code": "Compile", "detail": str(result["error"])}], [])
+		_preview.apply_plan({})
+		_preview.apply_props([], _palettes)
+		_preview.apply_hazards(_lattice.get_hazards())
+		_lattice.set_compile_result({}, {}, false)
+		_sync_preview_layers()
+		_set_phase2_ready(false)
+		return
+	_last_plan = result.get("plan", {})
+	if _prune_stale_module_overrides():
+		golden = _golden_from_lattice()
+		if _session != null and not _hydrating_document:
+			_session.commit_document(golden, "Remove stale module overrides")
+		result = author.compile(golden)
 	if _session != null:
 		_session.set_compile_result(result, golden)
 	if result.has("error"):

@@ -103,6 +103,30 @@ func _run_checks() -> void:
 			or str(rebuilt.get("goal_room", "")) != app._goal_room:
 		_fail("source reconstruction downgraded derelict scope or anchors")
 
+	# A vertical opening suppresses its ceiling. The authored ceiling override
+	# must be removed as part of the topology command, and that cleanup must be
+	# reversible with the same complete-document undo history.
+	var vertical_doc: Dictionary = app._empty_golden()
+	vertical_doc["topology"]["rooms"] = [
+		{"id": 1, "stable_id": "lower_01", "role": "airlock", "deck": 0, "cells": [[0, 0]]},
+		{"id": 2, "stable_id": "upper_01", "role": "airlock", "deck": 1, "cells": [[0, 0]]},
+	]
+	vertical_doc["module_overrides"]["ceilings"]["0|0|0"] = "ceiling_cap_1x1"
+	app._session.start_new(vertical_doc)
+	if not app._apply_source_document(vertical_doc):
+		_fail("vertical override fixture failed to hydrate")
+	app._lattice._commit_vertical(Vector3i(0, 0, 0), Vector3i(0, 0, 1))
+	await create_timer(0.15).timeout
+	if (app._module_overrides.get("ceilings", {}) as Dictionary).has("0|0|0"):
+		_fail("vertical edit left stale ceiling override")
+	if not app._compile_ok or not app._session.validation_matches_current():
+		_fail("validation did not recover after stale override cleanup")
+	if not app._session.can_undo():
+		_fail("stale override cleanup was not recorded as undoable")
+	app._undo_document()
+	if not (app._module_overrides.get("ceilings", {}) as Dictionary).has("0|0|0"):
+		_fail("undo did not restore the removed ceiling override")
+
 	# Destructive actions are held behind the unsaved guard.
 	var invoked := {"value": false}
 	app._guard_unsaved(func() -> void: invoked["value"] = true)
