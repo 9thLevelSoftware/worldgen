@@ -72,6 +72,7 @@ func _run_checks() -> void:
 			_app._on_run_game_pressed()
 			_preview_pid = int(_app._preview_process_id)
 			await _wait_for_preview_result()
+			_check_internal_preview_timeout()
 
 	await _cleanup_app()
 	_finish()
@@ -104,6 +105,22 @@ func _wait_for_preview_result() -> void:
 		await create_timer(0.25).timeout
 		elapsed += 0.25
 	_fail("preview did not produce a result within %.1fs (pid=%d)" % [TIMEOUT_SECONDS, _preview_pid])
+
+
+func _check_internal_preview_timeout() -> void:
+	_app._preview_result_path = "user://derelict_builder/missing_preview_result.json"
+	_app._preview_process_id = -1
+	_app._preview_deadline_msec = Time.get_ticks_msec() - 1
+	_app._preview_result_timer.start()
+	_app._poll_preview_result()
+	if not _app._preview_result_timer.is_stopped():
+		_fail("internal preview timeout left the poller running")
+	if int(_app._preview_process_id) != -1 or int(_app._preview_deadline_msec) != 0:
+		_fail("internal preview timeout did not reset process state")
+	if not str(_app._status.text).contains("within 45 seconds"):
+		_fail("internal preview timeout did not surface an actionable error")
+	if _app.get_node("%RunGameBtn").disabled:
+		_fail("internal preview timeout left Run in Game disabled")
 
 
 func _cleanup_app() -> void:

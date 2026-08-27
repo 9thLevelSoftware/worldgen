@@ -145,6 +145,7 @@ var _solid_dirs: Dictionary = {} # cell key -> PackedStringArray
 var _has_pending := false
 var _pending_cell := Vector3i.ZERO
 var _asset_sel: Dictionary = {}
+var _room_stable_id_remap: Dictionary = {}
 
 var _camera: Camera3D
 var _pivot: Node3D
@@ -223,6 +224,7 @@ func hydrate_document(golden: Dictionary) -> Dictionary:
 
 
 func _clear_document_state() -> void:
+	_room_stable_id_remap.clear()
 	_rooms.clear()
 	_occupancy.clear()
 	_portals.clear()
@@ -442,6 +444,15 @@ func _parse_hydrated_hazards(value: Variant, stable_ids: Dictionary, occupancy: 
 
 func get_rooms() -> Array[Dictionary]:
 	return _rooms
+
+
+## Return stable-ID replacements produced by the most recent room coalescence.
+## The builder consumes this synchronously from occupancy_changed so authored
+## entry/goal anchors follow the retained room instead of falling back.
+func consume_room_stable_id_remap() -> Dictionary:
+	var remap := _room_stable_id_remap.duplicate(true)
+	_room_stable_id_remap.clear()
+	return remap
 
 
 func get_selected() -> Dictionary:
@@ -1391,6 +1402,13 @@ func _rooms_share_cardinal(a: Dictionary, b: Dictionary) -> bool:
 func _merge_room_into(keep: Dictionary, drop: Dictionary) -> void:
 	var kid := int(keep["id"])
 	var did := int(drop["id"])
+	var keep_stable_id := str(keep.get("stable_id", ""))
+	var drop_stable_id := str(drop.get("stable_id", ""))
+	if not drop_stable_id.is_empty() and drop_stable_id != keep_stable_id:
+		_room_stable_id_remap[drop_stable_id] = keep_stable_id
+		for prior in _room_stable_id_remap:
+			if str(_room_stable_id_remap[prior]) == drop_stable_id:
+				_room_stable_id_remap[prior] = keep_stable_id
 	var deck := int(keep["deck"])
 	var cells: Array = keep["cells"]
 	for c in drop["cells"]:
@@ -1412,6 +1430,7 @@ func _merge_room_into(keep: Dictionary, drop: Dictionary) -> void:
 
 
 func _coalesce_touching_same_role() -> void:
+	_room_stable_id_remap.clear()
 	var i := 0
 	while i < _rooms.size():
 		var room: Dictionary = _rooms[i]

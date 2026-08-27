@@ -6,6 +6,7 @@ extends Control
 const _LATTICE := preload("res://scripts/OccupancyLattice.gd")
 const _SESSION := preload("res://scripts/BuilderSession.gd")
 const COMPILE_DEBOUNCE_S := 0.05
+const PREVIEW_TIMEOUT_MSEC := 45_000
 const STAGE_GEOMETRY := 0
 const STAGE_CONNECTIONS := 1
 const STAGE_PROPS_ASSETS := 2
@@ -41,6 +42,7 @@ var _pending_bundle_target := ""
 var _preview_result_timer: Timer
 var _preview_result_path := ""
 var _preview_process_id := -1
+var _preview_deadline_msec := 0
 var _session
 var _open_dialog: FileDialog
 var _save_dialog: FileDialog
@@ -316,10 +318,9 @@ func _new_document() -> void:
 
 
 func _open_document(path: String) -> void:
-	var result: Dictionary = _session.open_document(path)
+	var result: Dictionary = _session.open_document(path, _apply_source_document)
 	if not bool(result.get("ok", false)):
 		return
-	_apply_source_document(result.get("document", {}))
 	_status.text = "Opened %s" % path
 
 
@@ -702,6 +703,7 @@ func _on_run_game_pressed() -> void:
 	_status.text = "Run in Game launched · waiting for runtime acceptance result…"
 	%RunGameBtn.disabled = true
 	%RunGameBtn.tooltip_text = "Runtime preview process %d is validating this bundle." % _preview_process_id
+	_preview_deadline_msec = Time.get_ticks_msec() + PREVIEW_TIMEOUT_MSEC
 	_preview_result_timer.start()
 
 
@@ -718,10 +720,18 @@ func _poll_preview_result() -> void:
 			_preview_failure("RuntimeAcceptanceFailed", "; ".join(failures))
 			return
 		_status.text = "Run in Game ready · structural and authored runtime acceptance passed."
+		_preview_process_id = -1
+		_preview_deadline_msec = 0
 		_issues.clear()
 		var index := _issues.add_item("Ready · Synaptic Sea runtime preview passed")
 		_issues.set_item_metadata(index, result)
 		_update_run_game_state()
+		return
+	if _preview_deadline_msec > 0 and Time.get_ticks_msec() >= _preview_deadline_msec:
+		_preview_result_timer.stop()
+		if _preview_process_id > 0 and OS.is_process_running(_preview_process_id):
+			OS.kill(_preview_process_id)
+		_preview_failure("PreviewTimeout", "The runtime preview did not return an acceptance result within 45 seconds.")
 		return
 	if _preview_process_id > 0 and not OS.is_process_running(_preview_process_id):
 		_preview_result_timer.stop()
@@ -738,6 +748,7 @@ func _preview_failure(code: String, message: String) -> void:
 		"target_id": "validate_run",
 	}], [])
 	_preview_process_id = -1
+	_preview_deadline_msec = 0
 	_update_run_game_state()
 
 
@@ -923,7 +934,7 @@ func _on_view_gui_input(event: InputEvent) -> void:
 
 
 func _on_occupancy_changed() -> void:
-	_sync_entry_goal()
+	_sync_entry_goal(_lattice.consume_room_stable_id_remap())
 	_prune_room_vars()
 	_refresh_room_list()
 	_refresh_phases()
@@ -1604,7 +1615,11 @@ func _apply_preview_banner() -> void:
 	_banner_label.text = "CSG fallback: %s. Not claiming kit preview." % _preview.status_text()
 
 
-func _sync_entry_goal() -> void:
+func _sync_entry_goal(room_remap: Dictionary = {}) -> void:
+	if room_remap.has(_entry_room):
+		_entry_room = str(room_remap[_entry_room])
+	if room_remap.has(_goal_room):
+		_goal_room = str(room_remap[_goal_room])
 	var rooms: Array = _lattice.get_rooms()
 	if rooms.is_empty():
 		_entry_room = ""

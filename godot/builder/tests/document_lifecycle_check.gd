@@ -4,6 +4,7 @@ extends SceneTree
 ## BuilderApp integration for session history, source saves, reopening, and guards.
 
 const SOURCE_PATH := "user://derelict_builder/document_lifecycle_check.json"
+const INVALID_SOURCE_PATH := "user://derelict_builder/document_lifecycle_invalid.json"
 const RECOVERY_PATH := "user://derelict_builder/recovery/active.json"
 
 var _failed := false
@@ -50,6 +51,44 @@ func _run_checks() -> void:
 	if lattice.get_rooms().size() != 1 or str(lattice.get_rooms()[0].get("stable_id", "")) != "airlock_01":
 		_fail("open did not fully hydrate the saved source")
 
+	# A Rust-readable source can still be outside the builder lattice bounds.
+	# Reject it before the session adopts its path, history, or save target.
+	var prior_path: String = app._session.source_path
+	var prior_document: Dictionary = app._session.source_document.duplicate(true)
+	var invalid_document: Dictionary = prior_document.duplicate(true)
+	invalid_document["topology"]["rooms"][0]["cells"] = [[100, 0]]
+	var invalid_text: String = app.author.save_golden(invalid_document)
+	var invalid_file := FileAccess.open(INVALID_SOURCE_PATH, FileAccess.WRITE)
+	invalid_file.store_string(invalid_text)
+	invalid_file.close()
+	app._open_document(INVALID_SOURCE_PATH)
+	if app._session.source_path != prior_path or app._session.source_document != prior_document:
+		_fail("rejected open changed the active session")
+	if not lattice.has_occupied(Vector3i(0, 0, 0)) or lattice.has_occupied(Vector3i(100, 0, 0)):
+		_fail("rejected open changed the visible lattice")
+	app._save_document()
+	if FileAccess.get_file_as_string(INVALID_SOURCE_PATH) != invalid_text:
+		_fail("save after rejected open overwrote the rejected source")
+
+	# When a role edit absorbs the authored goal room, its stable anchor follows
+	# the retained room while the independent entry anchor stays intact.
+	var anchored: Dictionary = app._empty_golden()
+	anchored["scope"] = "derelict"
+	anchored["entry_room"] = "entry_03"
+	anchored["goal_room"] = "goal_02"
+	anchored["topology"]["rooms"] = [
+		{"id": 1, "stable_id": "retained_01", "role": "cargo", "deck": 0, "cells": [[0, 0]]},
+		{"id": 2, "stable_id": "goal_02", "role": "bridge", "deck": 0, "cells": [[1, 0]]},
+		{"id": 3, "stable_id": "entry_03", "role": "engineering", "deck": 0, "cells": [[3, 0]]},
+	]
+	app._session.start_new(anchored)
+	if not app._apply_source_document(anchored):
+		_fail("anchor coalescence fixture failed to hydrate")
+	lattice.select_room_id(2)
+	lattice.stamp_role("cargo")
+	if app._entry_room != "entry_03" or app._goal_room != "retained_01":
+		_fail("coalescence did not retarget entry/goal anchors: %s -> %s" % [app._entry_room, app._goal_room])
+
 	# Rebuilding an opened derelict must not silently downgrade its validation
 	# scope merely because it contains more than one room.
 	lattice.active_role = "cargo"
@@ -95,7 +134,7 @@ func _check_actions_enabled(app: Node) -> void:
 
 
 func _cleanup() -> void:
-	for path in [SOURCE_PATH, SOURCE_PATH + ".bak", RECOVERY_PATH, RECOVERY_PATH + ".bak"]:
+	for path in [SOURCE_PATH, SOURCE_PATH + ".bak", INVALID_SOURCE_PATH, INVALID_SOURCE_PATH + ".bak", RECOVERY_PATH, RECOVERY_PATH + ".bak"]:
 		if FileAccess.file_exists(path):
 			DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
 

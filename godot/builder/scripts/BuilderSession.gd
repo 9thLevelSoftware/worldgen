@@ -64,7 +64,7 @@ func start_new(document: Dictionary = {}) -> Dictionary:
 	history_changed.emit(false, false)
 	return {"ok": true, "document": source_document}
 
-func open_document(path: String) -> Dictionary:
+func open_document(path: String, before_commit: Callable = Callable()) -> Dictionary:
 	if path.is_empty() or not FileAccess.file_exists(path):
 		return _error("Source document not found: %s" % path)
 	var file := FileAccess.open(path, FileAccess.READ)
@@ -73,6 +73,11 @@ func open_document(path: String) -> Dictionary:
 	var loaded := _canonicalize_text(file.get_as_text())
 	if loaded.is_empty() and not _last_error.is_empty():
 		return _error(_last_error)
+	# Let the workspace hydrate the candidate before this session adopts its
+	# path or clears history. Rejected builder-specific geometry must leave the
+	# currently open source completely unchanged.
+	if before_commit.is_valid() and not bool(before_commit.call(loaded.duplicate(true))):
+		return {"ok": false, "error": "The source could not be hydrated by this builder."}
 	source_path = path
 	source_document = loaded
 	_saved_canonical = _serialize(loaded)
