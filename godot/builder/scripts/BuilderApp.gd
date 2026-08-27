@@ -41,7 +41,7 @@ var _pending_bundle_target := ""
 var _preview_result_timer: Timer
 var _preview_result_path := ""
 var _preview_process_id := -1
-var _session: BuilderSession
+var _session
 var _open_dialog: FileDialog
 var _save_dialog: FileDialog
 var _unsaved_dialog: ConfirmationDialog
@@ -293,7 +293,7 @@ func _on_unsaved_action(action: StringName) -> void:
 		_show_save_as()
 		return
 	_commit_session_document("Save before continuing")
-	var result := _session.save_document()
+	var result: Dictionary = _session.save_document()
 	if bool(result.get("ok", false)):
 		_continue_after_save = false
 		_continue_destructive_action()
@@ -302,7 +302,7 @@ func _on_unsaved_action(action: StringName) -> void:
 func _new_document() -> void:
 	_reset_document_metadata()
 	var document := _empty_golden()
-	var result := _session.start_new(document)
+	var result: Dictionary = _session.start_new(document)
 	if not bool(result.get("ok", false)):
 		return
 	_apply_source_document(document)
@@ -310,7 +310,7 @@ func _new_document() -> void:
 
 
 func _open_document(path: String) -> void:
-	var result := _session.open_document(path)
+	var result: Dictionary = _session.open_document(path)
 	if not bool(result.get("ok", false)):
 		return
 	_apply_source_document(result.get("document", {}))
@@ -322,7 +322,7 @@ func _save_document() -> void:
 	if _session.source_path.is_empty():
 		_show_save_as()
 		return
-	var result := _session.save_document()
+	var result: Dictionary = _session.save_document()
 	if bool(result.get("ok", false)):
 		_status.text = "Saved %s" % _session.source_path
 
@@ -337,7 +337,7 @@ func _save_document_as(path: String) -> void:
 	_commit_session_document("Save As")
 	if not path.to_lower().ends_with(".json"):
 		path += ".json"
-	var result := _session.save_document_as(path)
+	var result: Dictionary = _session.save_document_as(path)
 	if bool(result.get("ok", false)):
 		_status.text = "Saved %s" % path
 		if _continue_after_save:
@@ -346,21 +346,21 @@ func _save_document_as(path: String) -> void:
 
 
 func _undo_document() -> void:
-	var result := _session.undo()
+	var result: Dictionary = _session.undo()
 	if bool(result.get("ok", false)):
 		_apply_source_document(result.get("document", {}))
 		_status.text = "Undid the last document edit."
 
 
 func _redo_document() -> void:
-	var result := _session.redo()
+	var result: Dictionary = _session.redo()
 	if bool(result.get("ok", false)):
 		_apply_source_document(result.get("document", {}))
 		_status.text = "Redid the last document edit."
 
 
 func _restore_recovery() -> void:
-	var result := _session.restore_recovery()
+	var result: Dictionary = _session.restore_recovery()
 	if bool(result.get("ok", false)):
 		_apply_source_document(result.get("document", {}))
 		_status.text = "Recovered unsaved work. Save it to keep the recovered document."
@@ -664,8 +664,8 @@ func _on_run_game_pressed() -> void:
 	if _content_root_path.is_empty() or not FileAccess.file_exists(_preview_runner_scene_path()):
 		_preview_failure("PreviewRunnerMissing", "The configured content root has no derelict builder preview scene.")
 		return
-	var hash := _session.current_source_hash()
-	var suffix := hash.substr(0, mini(12, hash.length()))
+	var hash: String = _session.current_source_hash()
+	var suffix: String = hash.substr(0, mini(12, hash.length()))
 	var target := "user://derelict_builder/preview/%s_%s_bundle" % [_safe_bundle_name(_doc_id), suffix]
 	var exported := _export_bundle(target, true)
 	if not bool(exported.get("ok", false)):
@@ -745,7 +745,7 @@ func _update_run_game_state() -> void:
 	if not is_node_ready() or not has_node("%RunGameBtn"):
 		return
 	var runner_ready := not _content_root_path.is_empty() and FileAccess.file_exists(_preview_runner_scene_path())
-	var validation_ready := _compile_ok and _session != null and _session.validation_matches_current()
+	var validation_ready: bool = _compile_ok and _session != null and _session.validation_matches_current()
 	var running := _preview_result_timer != null and not _preview_result_timer.is_stopped()
 	%RunGameBtn.disabled = not runner_ready or not validation_ready or running
 	if running:

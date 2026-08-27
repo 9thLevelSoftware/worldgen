@@ -36,8 +36,8 @@ func _initialize() -> void:
 	_cleanup()
 	_finish()
 
-func _check_new_commit_undo_redo(session: BuilderSession, golden: Dictionary) -> void:
-	var started := session.start_new(golden)
+func _check_new_commit_undo_redo(session, golden: Dictionary) -> void:
+	var started: Dictionary = session.start_new(golden)
 	_expect(bool(started.get("ok", false)), "start_new succeeds")
 	var changed := golden.duplicate(true)
 	changed["display_name"] = "Session Check Edited"
@@ -49,32 +49,32 @@ func _check_new_commit_undo_redo(session: BuilderSession, golden: Dictionary) ->
 	_expect(str(session.source_document.get("display_name", "")) == "Session Check Edited", "redo restores edit")
 	_expect(not session.commit_document(session.source_document.duplicate(true), "No-op"), "no-op commit does not add history")
 
-func _check_save_reopen(session: BuilderSession, golden: Dictionary) -> void:
-	var saved := session.save_document_as(SOURCE_PATH)
+func _check_save_reopen(session, golden: Dictionary) -> void:
+	var saved: Dictionary = session.save_document_as(SOURCE_PATH)
 	_expect(bool(saved.get("ok", false)), "save as succeeds")
 	_expect(not session.has_unsaved_changes(), "save clears dirty state")
-	var reopened := session.open_document(SOURCE_PATH)
+	var reopened: Dictionary = session.open_document(SOURCE_PATH)
 	_expect(bool(reopened.get("ok", false)), "open succeeds")
 	_expect(session.source_document == golden or str(session.source_document.get("display_name", "")) == "Session Check Edited", "reopen preserves semantic document")
 	var canonical := str(session.author.save_golden(session.source_document))
 	_expect(not canonical.is_empty(), "reopen remains author-canonical")
 
-func _check_recovery(session: BuilderSession, golden: Dictionary) -> void:
+func _check_recovery(session, golden: Dictionary) -> void:
 	var changed := golden.duplicate(true)
 	changed["display_name"] = "Recovered Session"
 	session.start_new(golden)
 	session.commit_document(changed, "Recovery edit")
-	var flushed := session.flush_recovery_for_test()
+	var flushed: Dictionary = session.flush_recovery_for_test()
 	_expect(bool(flushed.get("ok", false)) and bool(flushed.get("written", true)), "recovery snapshot writes")
 	_expect(session.has_recovery(), "recovery is discoverable")
 	_expect(recovery_notifications == 0, "autosave does not announce recovery")
-	var saved := session.save_document_as(SOURCE_PATH)
+	var saved: Dictionary = session.save_document_as(SOURCE_PATH)
 	_expect(bool(saved.get("ok", false)), "save supersedes recovery")
 	_expect(not session.has_recovery(), "successful save removes recovery snapshot")
 	session.start_new(golden)
 	session.commit_document(changed, "Recovery edit 2")
 	session.flush_recovery_for_test()
-	var restored := session.restore_recovery()
+	var restored: Dictionary = session.restore_recovery()
 	_expect(bool(restored.get("ok", false)), "recovery restores")
 	_expect(str(session.source_document.get("display_name", "")) == "Recovered Session", "recovery restores latest document")
 	_expect(session.discard_recovery(), "recovery discard succeeds")
