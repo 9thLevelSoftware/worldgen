@@ -228,7 +228,7 @@ func _configure_document_actions() -> void:
 	_unsaved_dialog.dialog_text = "Save or discard the current changes before continuing."
 	_unsaved_dialog.ok_button_text = "Discard changes"
 	_unsaved_dialog.add_button("Save", false, "save")
-	_unsaved_dialog.confirmed.connect(_continue_destructive_action)
+	_unsaved_dialog.confirmed.connect(_discard_and_continue_destructive_action)
 	_unsaved_dialog.custom_action.connect(_on_unsaved_action)
 	add_child(_unsaved_dialog)
 
@@ -282,6 +282,12 @@ func _continue_destructive_action() -> void:
 	_pending_destructive_action = Callable()
 	if action.is_valid():
 		action.call()
+
+
+func _discard_and_continue_destructive_action() -> void:
+	if _session != null:
+		_session.discard_recovery()
+	_continue_destructive_action()
 
 
 func _on_unsaved_action(action: StringName) -> void:
@@ -769,9 +775,9 @@ func _export_bundle(target: String, overwrite: bool) -> Dictionary:
 	var err := str(docs.get("error", ""))
 	if not err.is_empty():
 		return _export_failure("Export", err)
-	var layout := str(docs.get("layout_json", ""))
-	var gameplay := str(docs.get("gameplay_slice_json", ""))
-	var source := str(author.save_golden(golden))
+	var layout := _with_trailing_newline(str(docs.get("layout_json", "")))
+	var gameplay := _with_trailing_newline(str(docs.get("gameplay_slice_json", "")))
+	var source := _with_trailing_newline(str(author.save_golden(golden)))
 	if layout.is_empty() or gameplay.is_empty() or source.is_empty():
 		return _export_failure("Export", "Rust returned an empty source or runtime document.")
 	var layout_doc: Variant = JSON.parse_string(layout)
@@ -783,7 +789,7 @@ func _export_bundle(target: String, overwrite: bool) -> Dictionary:
 	var manifest := {
 		"schema_version": "1.0.0",
 		"document_kind": "derelict_builder_bundle",
-		"source_hash": _session.current_source_hash(),
+		"source_hash": _sha256(source),
 		"source_path": "source.golden_area.json",
 		"layout_path": "layout.json",
 		"gameplay_slice_path": "gameplay_slice.json",
@@ -883,6 +889,10 @@ func _sha256(content: String) -> String:
 	context.start(HashingContext.HASH_SHA256)
 	context.update(content.to_utf8_buffer())
 	return context.finish().hex_encode()
+
+
+func _with_trailing_newline(content: String) -> String:
+	return content if content.is_empty() or content.ends_with("\n") else content + "\n"
 
 
 func _kit_path(kit: String) -> String:
@@ -1761,7 +1771,9 @@ func _golden_from_lattice() -> Dictionary:
 			"deck": int(r["deck"]),
 			"cells": cells,
 		})
-	var scope := "area" if rooms.size() > 1 else _scope
+	var scope := _scope
+	if scope == "room" and rooms.size() > 1:
+		scope = "area"
 	var g := _empty_golden()
 	g["id"] = _doc_id
 	g["display_name"] = _display_name

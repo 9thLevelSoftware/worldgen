@@ -50,8 +50,21 @@ func _run_checks() -> void:
 	if lattice.get_rooms().size() != 1 or str(lattice.get_rooms()[0].get("stable_id", "")) != "airlock_01":
 		_fail("open did not fully hydrate the saved source")
 
+	# Rebuilding an opened derelict must not silently downgrade its validation
+	# scope merely because it contains more than one room.
+	lattice.active_role = "cargo"
+	lattice.paint_cell(Vector3i(2, 0, 0))
+	app._scope = "derelict"
+	var authored_rooms: Array = lattice.get_rooms()
+	app._entry_room = str(authored_rooms[0].get("stable_id", ""))
+	app._goal_room = str(authored_rooms[1].get("stable_id", ""))
+	var rebuilt: Dictionary = app._golden_from_lattice()
+	if str(rebuilt.get("scope", "")) != "derelict" \
+			or str(rebuilt.get("entry_room", "")) != app._entry_room \
+			or str(rebuilt.get("goal_room", "")) != app._goal_room:
+		_fail("source reconstruction downgraded derelict scope or anchors")
+
 	# Destructive actions are held behind the unsaved guard.
-	lattice.paint_cell(Vector3i(1, 0, 0))
 	var invoked := {"value": false}
 	app._guard_unsaved(func() -> void: invoked["value"] = true)
 	if invoked["value"] or not app._unsaved_dialog.visible:
@@ -62,6 +75,9 @@ func _run_checks() -> void:
 	await create_timer(0.9).timeout
 	if not FileAccess.file_exists(RECOVERY_PATH):
 		_fail("debounced recovery snapshot was not written")
+	app._discard_and_continue_destructive_action()
+	if not bool(invoked["value"]) or FileAccess.file_exists(RECOVERY_PATH):
+		_fail("discard did not continue the action and remove recovery data")
 
 	app.get_tree().auto_accept_quit = true
 	app.queue_free()

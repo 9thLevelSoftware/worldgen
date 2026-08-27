@@ -77,8 +77,14 @@ func _check_bundle(app: Node) -> void:
 	if not (manifest is Dictionary):
 		_fail("manifest is not JSON")
 		return
-	if str(manifest.get("source_hash", "")) != app._session.current_source_hash():
-		_fail("manifest source hash does not match the validated source")
+	for pair in [
+		["source_hash", "source.golden_area.json"],
+		["layout_hash", "layout.json"],
+		["gameplay_slice_hash", "gameplay_slice.json"],
+	]:
+		var expected := _file_hash(TARGET.path_join(str(pair[1])))
+		if str(manifest.get(str(pair[0]), "")) != expected:
+			_fail("manifest %s does not match written %s bytes" % [pair[0], pair[1]])
 	if manifest.get("validation_result", "") != "passed":
 		_fail("manifest did not record validation success")
 	if manifest.get("layout_schema", "") != "1.2.0" or manifest.get("gameplay_schema", "") != "1.1.0":
@@ -112,6 +118,13 @@ func _check_stale_validation(app: Node) -> void:
 
 func _repo_root() -> String:
 	return ProjectSettings.globalize_path("res://../..")
+
+
+func _file_hash(path: String) -> String:
+	var context := HashingContext.new()
+	context.start(HashingContext.HASH_SHA256)
+	context.update(FileAccess.get_file_as_bytes(path))
+	return context.finish().hex_encode()
 
 
 func _cleanup() -> void:
