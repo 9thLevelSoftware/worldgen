@@ -13,7 +13,7 @@ use derelict_core::structural::compile::{
     FLOOR_MODULE, HATCH_MODULE, INNER_CORNER_MODULE, LOCKED_MODULE, OUTER_CORNER_MODULE,
     T_JUNCTION_MODULE, WALL_MODULE,
 };
-use derelict_core::structural::export::{layout_from_golden, structural_plan_to_json};
+use derelict_core::structural::export::{layout_from_golden_with_picker, structural_plan_to_json};
 use derelict_core::structural::plan::{RoomId, StructuralPlan, Topology, NO_ROOM};
 use derelict_core::structural::sockets::SocketCatalog;
 use derelict_core::structural::validate::{
@@ -374,12 +374,46 @@ impl DerelictAuthor {
                 godot::global::godot_error!("DerelictAuthor.export_playable: {e}");
                 export_error_dict(&e)
             }
-            Ok(mut golden) => {
+            Ok(golden) => {
                 let kit = kit_id.to_string();
-                if !kit.is_empty() {
-                    golden.kit_id = kit;
+                if kit != golden.kit_id {
+                    let e = format!(
+                        "kit mismatch: export argument '{}' must match GoldenArea kit_id '{}'",
+                        kit, golden.kit_id
+                    );
+                    godot::global::godot_error!("DerelictAuthor.export_playable: {e}");
+                    return export_error_dict(&e);
                 }
-                match layout_from_golden(&golden) {
+                let compiled = match self.compile_golden(&golden) {
+                    Ok(out) => out,
+                    Err(e) => return export_error_dict(&e),
+                };
+                if !compiled.issues.is_empty() {
+                    let e = compiled
+                        .issues
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    return export_error_dict(&e);
+                }
+                if !compiled.stale.is_empty() {
+                    let e = compiled
+                        .stale
+                        .iter()
+                        .map(|s| {
+                            format!(
+                                "stale {:?} override '{}' -> '{}'",
+                                s.class, s.key, s.module_id
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    return export_error_dict(&e);
+                }
+                let picker = self.picker_for(&golden.kit_id);
+                let allowed_floors = self.floor_modules_for(&golden.kit_id);
+                match layout_from_golden_with_picker(&golden, picker, allowed_floors) {
                     Err(e) => {
                         godot::global::godot_error!("DerelictAuthor.export_playable: {e}");
                         export_error_dict(&e)
@@ -392,6 +426,9 @@ impl DerelictAuthor {
                         let mut d = VarDictionary::new();
                         d.set("layout_json", layout.as_str());
                         d.set("gameplay_slice_json", slice.as_str());
+                        d.set("kit_id", golden.kit_id.as_str());
+                        d.set("layout_schema", "1.2.0");
+                        d.set("gameplay_schema", "1.1.0");
                         d.set("error", "");
                         d
                     }
@@ -435,8 +472,21 @@ fn load_golden_json(text: &str) -> Result<Value, String> {
         serde_json::from_str(text).map_err(|e| format!("failed to parse golden JSON: {e}"))?;
     coerce_golden_value(&mut value)?;
     // Round-trip through the DTO so the Dictionary is canonical.
-    let golden = golden_from_json(&value)?;
+    let mut golden = golden_from_json(&value)?;
+    normalize_room_vars_to_stable_ids(&mut golden);
     serde_json::to_value(&golden).map_err(|e| e.to_string())
+}
+
+fn normalize_room_vars_to_stable_ids(golden: &mut GoldenArea) {
+    for room in &golden.topology.rooms {
+        if golden.room_vars.contains_key(&room.stable_id) {
+            golden.room_vars.remove(&room.id.to_string());
+            continue;
+        }
+        if let Some(vars) = golden.room_vars.remove(&room.id.to_string()) {
+            golden.room_vars.insert(room.stable_id.clone(), vars);
+        }
+    }
 }
 
 fn error_dict(msg: &str) -> VarDictionary {
@@ -734,12 +784,58 @@ fn zones_to_json(out: &CompileOut) -> Value {
 fn issues_array(issues: &[ValidationIssue]) -> VarArray {
     let mut arr = VarArray::new();
     for issue in issues {
+        let code = format!("{:?}", issue.code);
+        let (target_id, deck, cell) = diagnostic_location(&issue.detail);
         arr.push(&json_to_variant(&json!({
-            "code": format!("{:?}", issue.code),
+            "code": code,
+            "severity": "error",
+            "message": issue.detail,
             "detail": issue.detail,
+            "target_type": diagnostic_target_type(&code),
+            "target_id": target_id,
+            "deck": deck,
+            "cell": cell,
+            "repair_id": Value::Null,
         })));
     }
     arr
+}
+
+fn diagnostic_location(detail: &str) -> (String, Value, Value) {
+    for raw in detail.split_whitespace() {
+        let token = raw.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '|' && c != '-');
+        let parts: Vec<&str> = token.split('|').collect();
+        if parts.len() == 3 {
+            if let (Ok(deck), Ok(x), Ok(y)) = (
+                parts[0].parse::<i32>(),
+                parts[1].parse::<i32>(),
+                parts[2].parse::<i32>(),
+            ) {
+                return (token.to_string(), json!(deck), json!([x, y, deck]));
+            }
+        } else if parts.len() == 4 && matches!(parts[1], "h" | "v") {
+            if let (Ok(deck), Ok(x), Ok(y)) = (
+                parts[0].parse::<i32>(),
+                parts[2].parse::<i32>(),
+                parts[3].parse::<i32>(),
+            ) {
+                return (token.to_string(), json!(deck), json!([x, y, deck]));
+            }
+        }
+    }
+    (String::new(), Value::Null, Value::Null)
+}
+
+fn diagnostic_target_type(code: &str) -> &'static str {
+    if code.starts_with("Floor") || code.starts_with("Ceiling") {
+        "module"
+    } else if code.starts_with("Portal") || code.starts_with("Edge") {
+        "connection"
+    } else if code.starts_with("Occupancy") || code.starts_with("Reachability") {
+        "room"
+    } else {
+        "document"
+    }
 }
 
 fn stale_array(stale: &[StaleOverride]) -> VarArray {
@@ -750,10 +846,19 @@ fn stale_array(stale: &[StaleOverride]) -> VarArray {
             StaleClass::Ceiling => "ceiling",
             StaleClass::Edge => "edge",
         };
+        let (_parsed_id, deck, cell) = diagnostic_location(&s.key);
         arr.push(&json_to_variant(&json!({
             "class": class,
             "key": s.key,
             "module_id": s.module_id,
+            "code": "StaleModuleOverride",
+            "severity": "warning",
+            "message": format!("{} override '{}' references unavailable module '{}'", class, s.key, s.module_id),
+            "target_type": "module_override",
+            "target_id": s.key,
+            "deck": deck,
+            "cell": cell,
+            "repair_id": "remove_stale_override",
         })));
     }
     arr
@@ -1079,5 +1184,18 @@ mod tests {
             legal_module_ids(None, "floor", "bridge"),
             vec![FLOOR_MODULE.to_string()]
         );
+    }
+
+    #[test]
+    fn diagnostics_extract_floor_and_edge_targets() {
+        let floor = diagnostic_location("floor 2|-3|4 module 'bad'");
+        assert_eq!(floor.0, "2|-3|4");
+        assert_eq!(floor.1, json!(2));
+        assert_eq!(floor.2, json!([-3, 4, 2]));
+
+        let edge = diagnostic_location("required edge has no placement: 1|v|7|-2");
+        assert_eq!(edge.0, "1|v|7|-2");
+        assert_eq!(edge.1, json!(1));
+        assert_eq!(edge.2, json!([7, -2, 1]));
     }
 }

@@ -7,11 +7,17 @@ var _failed := false
 
 
 func _initialize() -> void:
+	call_deferred("_run_checks")
+
+
+func _run_checks() -> void:
 	_check_palette()
 	_check_snap()
 	_check_shared_solid_facing()
 	_check_preview()
 	_check_compile_airlock()
+	await process_frame
+	await process_frame
 	if _failed:
 		print("PROP_PALETTE: FAIL")
 		quit(1)
@@ -86,7 +92,7 @@ func _check_palette() -> void:
 	if gp.size() != 2:
 		_fail("expected 2 gameplay props, got %d" % gp.size())
 	print("PALETTE_OK furnishing/role/stand-in/no-door")
-	dock.free()
+	dock.queue_free()
 
 
 func _check_snap() -> void:
@@ -188,7 +194,7 @@ func _check_snap() -> void:
 	if not lattice.get_armed_prop().is_empty():
 		_fail("Door palette arm should be refused")
 	print("SNAP_OK reserved/wall/center/one-per-cell/inspect/facing/rotate")
-	lattice.free()
+	lattice.queue_free()
 
 
 func _check_shared_solid_facing() -> void:
@@ -239,7 +245,7 @@ func _check_shared_solid_facing() -> void:
 		_fail("east cell west band should face west, got %s" % props[0].get("facing", ""))
 	else:
 		print("SHARED_SOLID_OK east cell west band facing=west")
-	lattice.free()
+	lattice.queue_free()
 
 
 func _check_preview() -> void:
@@ -313,7 +319,7 @@ func _check_preview() -> void:
 	if crate == null:
 		_fail("missing gameplay crate CSG")
 	print("PREVIEW_OK csg/stand-in/no-tscn/cell-center")
-	preview.free()
+	preview.queue_free()
 
 
 func _check_compile_airlock() -> void:
@@ -369,7 +375,7 @@ func _check_compile_airlock() -> void:
 	print("AIRLOCK_PROP_OK glb=%d fallback=%d nodes=%d" % [
 		preview.prop_glb_count, preview.prop_fallback_count, preview.prop_nodes().size()
 	])
-	preview.free()
+	preview.queue_free()
 
 
 func _prop_by_proto(preview, proto: String) -> Node3D:

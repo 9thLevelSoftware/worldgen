@@ -47,6 +47,35 @@
       "type": "reach_room"
     }
   ],
+  "placed_props": [
+    {
+      "approach_cell": [
+        0,
+        1,
+        0
+      ],
+      "cell": [
+        0,
+        1,
+        0
+      ],
+      "contents": [
+        {
+          "item_id": "scrap_metal",
+          "qty": 2
+        }
+      ],
+      "facing": "east",
+      "id": "prop_1",
+      "inventory_mode": "explicit",
+      "kind": "Container",
+      "locked": false,
+      "proto": "suit_locker",
+      "room_id": "airlock_01",
+      "rotation": 2,
+      "visual_id": "generic_locker"
+    }
+  ],
   "program_id": "worldgen-golden-0",
   "schema_version": "1.1.0",
   "start_room": "airlock_01",

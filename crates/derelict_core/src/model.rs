@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Bumped on ANY change that alters generated output (stage logic, RNG
 /// consumption order, archetype schema). Baked into ships and save diffs.
-pub const GENERATOR_VERSION: u32 = 3;
+pub const GENERATOR_VERSION: u32 = 4;
 
 /// Intactness is fixed-point: 0..=10000 basis points (10000 = pristine).
 pub type Intactness = u16;

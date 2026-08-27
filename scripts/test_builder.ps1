@@ -97,6 +97,7 @@ function Install-Extension {
 $godot = Resolve-Godot $GodotPath
 $contentRoot = Resolve-ContentRoot $SynapticSeaRoot
 $env:SYNAPTIC_SEA_ROOT = $contentRoot
+$env:DERELICT_PREVIEW_GODOT = $godot
 Write-Host "Godot: $godot"
 Write-Host "SYNAPTIC_SEA_ROOT: $env:SYNAPTIC_SEA_ROOT"
 
@@ -104,10 +105,15 @@ if (-not $SkipBuild) { Install-Extension }
 
 $checks = @(
     "guided_workspace_check.gd",
+    "builder_session_check.gd",
+    "document_lifecycle_check.gd",
+    "export_bundle_check.gd",
+    "lattice_hydration_check.gd",
     "hazard_zone_check.gd",
     "module_picker_check.gd",
     "prop_palette_check.gd",
-    "structural_preview_check.gd"
+    "structural_preview_check.gd",
+    "run_in_game_check.gd"
 )
 foreach ($check in $checks) {
     Write-Host "Running builder check: $check"

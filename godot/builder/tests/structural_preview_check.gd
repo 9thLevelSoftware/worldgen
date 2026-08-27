@@ -159,8 +159,13 @@ func _initialize() -> void:
 	else:
 		print("PAINT_AFTER_HIDE_OK %s" % neighbor)
 
-	preview.free()
-	lattice.free()
+	preview.queue_free()
+	lattice.queue_free()
+	# StructuralPreview replaces render nodes with queue_free() so the dummy
+	# renderer can retire their RIDs safely. Give Godot two frames to flush the
+	# deletion queue before this headless SceneTree exits.
+	await process_frame
+	await process_frame
 	if failed:
 		print("STRUCTURAL_PREVIEW: FAIL")
 		quit(1)

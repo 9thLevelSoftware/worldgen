@@ -153,28 +153,27 @@ fn floor_override_validates_pre_damage() {
 }
 
 #[test]
-fn vertex_dressed_wall_override_survives_and_rebuilds_sockets() {
+fn edge_wall_override_survives_and_rebuilds_sockets() {
     let golden = sample();
     let topo = golden.to_topology().unwrap();
     let mut plan = compile(&topo, &DefaultModulePicker);
-    let (key, previous) = plan
+    let key = plan
         .edges
         .iter()
-        .find(|(_, e)| e.kind == EdgeKind::Solid && e.module_id != WALL_MODULE)
-        .map(|(k, e)| (k.clone(), e.module_id.clone()))
-        .expect("2x2 airlock should have a vertex-dressed wall");
-    assert_ne!(previous, WALL_MODULE);
+        .find(|(_, e)| e.kind == EdgeKind::Solid && e.module_id == WALL_MODULE)
+        .map(|(k, _)| k.clone())
+        .expect("2x2 airlock should have a solid wall");
 
     let mut ov = ModuleOverrides::default();
-    ov.edges.insert(key.clone(), WALL_MODULE.to_string());
+    ov.edges.insert(key.clone(), "wall_end_cap".to_string());
     plan.socket_bindings.clear();
     let stale = apply_module_overrides(&mut plan, &ov);
     assert!(stale.is_empty(), "stale: {stale:?}");
-    assert_eq!(plan.edges[&key].module_id, WALL_MODULE);
+    assert_eq!(plan.edges[&key].module_id, "wall_end_cap");
     assert!(
         plan.placements
             .iter()
-            .any(|p| p.edge_key == key && p.module_id == WALL_MODULE),
+            .any(|p| p.edge_key == key && p.module_id == "wall_end_cap"),
         "overridden wall must be in rebuilt placements"
     );
     assert!(

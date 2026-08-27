@@ -4,6 +4,7 @@ extends Control
 ## through DerelictAuthor on a 50 ms debounce. StructuralPlan GLB preview.
 
 const _LATTICE := preload("res://scripts/OccupancyLattice.gd")
+const _SESSION := preload("res://scripts/BuilderSession.gd")
 const COMPILE_DEBOUNCE_S := 0.05
 const STAGE_GEOMETRY := 0
 const STAGE_CONNECTIONS := 1
@@ -26,11 +27,28 @@ var _module_sel: Dictionary = {}
 var _content_offline := true
 var _doc_id := "untitled"
 var _display_name := "Untitled"
+var _scope := "room"
+var _kit_id := "ship_structural_v0"
+var _stamp_meta: Variant = null
 var _entry_room := ""
 var _goal_room := ""
 var _compile_ok := false
+var _content_root_path := ""
 var _compile_timer: Timer
 var _export_dialog: FileDialog
+var _overwrite_dialog: ConfirmationDialog
+var _pending_bundle_target := ""
+var _preview_result_timer: Timer
+var _preview_result_path := ""
+var _preview_process_id := -1
+var _session: BuilderSession
+var _open_dialog: FileDialog
+var _save_dialog: FileDialog
+var _unsaved_dialog: ConfirmationDialog
+var _recovery_dialog: ConfirmationDialog
+var _pending_destructive_action: Callable
+var _continue_after_save := false
+var _hydrating_document := false
 
 @onready var _banner: PanelContainer = %Banner
 @onready var _banner_label: Label = %BannerLabel
@@ -77,6 +95,7 @@ func _ready() -> void:
 	golden = _empty_golden()
 	if ClassDB.class_exists("DerelictAuthor"):
 		author = ClassDB.instantiate("DerelictAuthor")
+	_configure_session()
 	_resolve_content()
 	_schedule_compile()
 	_sync_deck_label()
@@ -84,6 +103,7 @@ func _ready() -> void:
 	_apply_phase(0)
 	_status.text = "Hover: move over the canvas for valid and blocked placement feedback."
 	_update_persistent_guidance()
+	get_tree().auto_accept_quit = false
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -124,6 +144,12 @@ func _wire() -> void:
 	_export_dialog.min_size = Vector2i(720, 420)
 	_export_dialog.dir_selected.connect(_on_export_dir)
 	add_child(_export_dialog)
+	_overwrite_dialog = ConfirmationDialog.new()
+	_overwrite_dialog.title = "Replace export bundle?"
+	_overwrite_dialog.dialog_text = "The selected document bundle already exists. Replace it atomically?"
+	_overwrite_dialog.ok_button_text = "Replace bundle"
+	_overwrite_dialog.confirmed.connect(_confirm_bundle_overwrite)
+	add_child(_overwrite_dialog)
 	%NewRoomBtn.pressed.connect(func() -> void: _lattice.create_room())
 	_view.gui_input.connect(_on_view_gui_input)
 	_view.mouse_exited.connect(_on_view_pointer_cancelled)
@@ -160,18 +186,200 @@ func _wire() -> void:
 	_compile_timer.wait_time = COMPILE_DEBOUNCE_S
 	_compile_timer.timeout.connect(_run_compile)
 	add_child(_compile_timer)
+	_preview_result_timer = Timer.new()
+	_preview_result_timer.wait_time = 0.25
+	_preview_result_timer.timeout.connect(_poll_preview_result)
+	add_child(_preview_result_timer)
 
 
 func _configure_document_actions() -> void:
 	_dirty_label.text = "Saved · %s" % _display_name
-	for button_name in ["NewBtn", "OpenBtn", "SaveBtn", "SaveAsBtn", "UndoBtn", "RedoBtn"]:
-		var button := get_node_or_null("%%%s" % button_name) as Button
-		if button == null:
-			continue
-		button.disabled = true
-		button.tooltip_text = "Document lifecycle, recovery, and undo/redo arrive in milestone 3."
-	%RunGameBtn.disabled = true
-	%RunGameBtn.tooltip_text = "The Synaptic Sea preview runner is not connected yet. Validate/export remain available."
+	%NewBtn.pressed.connect(_request_new_document)
+	%OpenBtn.pressed.connect(_request_open_document)
+	%SaveBtn.pressed.connect(_save_document)
+	%SaveAsBtn.pressed.connect(_show_save_as)
+	%UndoBtn.pressed.connect(_undo_document)
+	%RedoBtn.pressed.connect(_redo_document)
+	%UndoBtn.disabled = true
+	%RedoBtn.disabled = true
+
+	_open_dialog = FileDialog.new()
+	_open_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	_open_dialog.access = FileDialog.ACCESS_FILESYSTEM
+	_open_dialog.title = "Open GoldenArea source"
+	_open_dialog.filters = PackedStringArray(["*.json ; GoldenArea JSON"])
+	_open_dialog.min_size = Vector2i(760, 460)
+	_open_dialog.file_selected.connect(_open_document)
+	add_child(_open_dialog)
+
+	_save_dialog = FileDialog.new()
+	_save_dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE
+	_save_dialog.access = FileDialog.ACCESS_FILESYSTEM
+	_save_dialog.title = "Save GoldenArea source"
+	_save_dialog.filters = PackedStringArray(["*.json ; GoldenArea JSON"])
+	_save_dialog.current_file = "untitled.golden_area.json"
+	_save_dialog.min_size = Vector2i(760, 460)
+	_save_dialog.file_selected.connect(_save_document_as)
+	_save_dialog.canceled.connect(func() -> void: _continue_after_save = false)
+	add_child(_save_dialog)
+
+	_unsaved_dialog = ConfirmationDialog.new()
+	_unsaved_dialog.title = "Unsaved changes"
+	_unsaved_dialog.dialog_text = "Save or discard the current changes before continuing."
+	_unsaved_dialog.ok_button_text = "Discard changes"
+	_unsaved_dialog.add_button("Save", false, "save")
+	_unsaved_dialog.confirmed.connect(_continue_destructive_action)
+	_unsaved_dialog.custom_action.connect(_on_unsaved_action)
+	add_child(_unsaved_dialog)
+
+	_recovery_dialog = ConfirmationDialog.new()
+	_recovery_dialog.title = "Recover unsaved work"
+	_recovery_dialog.dialog_text = "A recovery snapshot from an earlier session is available."
+	_recovery_dialog.ok_button_text = "Restore"
+	_recovery_dialog.add_button("Discard", true, "discard")
+	_recovery_dialog.confirmed.connect(_restore_recovery)
+	_recovery_dialog.custom_action.connect(_on_recovery_action)
+	add_child(_recovery_dialog)
+	%RunGameBtn.pressed.connect(_on_run_game_pressed)
+	_update_run_game_state()
+
+
+func _configure_session() -> void:
+	_session = _SESSION.new()
+	add_child(_session)
+	_session.dirty_changed.connect(_on_session_dirty_changed)
+	_session.history_changed.connect(_on_session_history_changed)
+	_session.session_error.connect(func(message: String) -> void: _status.text = "Document error: %s" % message)
+	_session.recovery_available.connect(func(_path: String) -> void:
+		if _recovery_dialog != null:
+			_recovery_dialog.popup_centered()
+	)
+	_session.initialize(author, "active")
+	_session.start_new(golden)
+	_on_session_dirty_changed(false)
+	if _session.has_recovery():
+		_recovery_dialog.popup_centered()
+
+
+func _request_new_document() -> void:
+	_guard_unsaved(_new_document)
+
+
+func _request_open_document() -> void:
+	_guard_unsaved(func() -> void: _open_dialog.popup_centered())
+
+
+func _guard_unsaved(action: Callable) -> void:
+	if _session == null or not _session.has_unsaved_changes():
+		action.call()
+		return
+	_pending_destructive_action = action
+	_unsaved_dialog.popup_centered()
+
+
+func _continue_destructive_action() -> void:
+	var action := _pending_destructive_action
+	_pending_destructive_action = Callable()
+	if action.is_valid():
+		action.call()
+
+
+func _on_unsaved_action(action: StringName) -> void:
+	if action != &"save":
+		return
+	_unsaved_dialog.hide()
+	_continue_after_save = true
+	if _session.source_path.is_empty():
+		_show_save_as()
+		return
+	_commit_session_document("Save before continuing")
+	var result := _session.save_document()
+	if bool(result.get("ok", false)):
+		_continue_after_save = false
+		_continue_destructive_action()
+
+
+func _new_document() -> void:
+	_reset_document_metadata()
+	var document := _empty_golden()
+	var result := _session.start_new(document)
+	if not bool(result.get("ok", false)):
+		return
+	_apply_source_document(document)
+	_status.text = "New reusable room document created."
+
+
+func _open_document(path: String) -> void:
+	var result := _session.open_document(path)
+	if not bool(result.get("ok", false)):
+		return
+	_apply_source_document(result.get("document", {}))
+	_status.text = "Opened %s" % path
+
+
+func _save_document() -> void:
+	_commit_session_document("Save")
+	if _session.source_path.is_empty():
+		_show_save_as()
+		return
+	var result := _session.save_document()
+	if bool(result.get("ok", false)):
+		_status.text = "Saved %s" % _session.source_path
+
+
+func _show_save_as() -> void:
+	if _session != null and not _session.source_path.is_empty():
+		_save_dialog.current_path = _session.source_path
+	_save_dialog.popup_centered()
+
+
+func _save_document_as(path: String) -> void:
+	_commit_session_document("Save As")
+	if not path.to_lower().ends_with(".json"):
+		path += ".json"
+	var result := _session.save_document_as(path)
+	if bool(result.get("ok", false)):
+		_status.text = "Saved %s" % path
+		if _continue_after_save:
+			_continue_after_save = false
+			_continue_destructive_action()
+
+
+func _undo_document() -> void:
+	var result := _session.undo()
+	if bool(result.get("ok", false)):
+		_apply_source_document(result.get("document", {}))
+		_status.text = "Undid the last document edit."
+
+
+func _redo_document() -> void:
+	var result := _session.redo()
+	if bool(result.get("ok", false)):
+		_apply_source_document(result.get("document", {}))
+		_status.text = "Redid the last document edit."
+
+
+func _restore_recovery() -> void:
+	var result := _session.restore_recovery()
+	if bool(result.get("ok", false)):
+		_apply_source_document(result.get("document", {}))
+		_status.text = "Recovered unsaved work. Save it to keep the recovered document."
+
+
+func _on_recovery_action(action: StringName) -> void:
+	if action == &"discard":
+		_session.discard_recovery()
+		_recovery_dialog.hide()
+
+
+func _on_session_dirty_changed(dirty: bool) -> void:
+	_dirty_label.text = "%s · %s" % ["Unsaved" if dirty else "Saved", _display_name]
+	_update_run_game_state()
+
+
+func _on_session_history_changed(can_undo: bool, can_redo: bool) -> void:
+	%UndoBtn.disabled = not can_undo
+	%RedoBtn.disabled = not can_redo
 
 
 func _build_phases() -> void:
@@ -198,6 +406,8 @@ func _on_stage_selected(idx: int) -> void:
 
 
 func _apply_phase(idx: int) -> void:
+	if _session != null:
+		_session.active_stage = str(STAGE_TITLES[idx]).to_lower().replace(" & ", "_").replace(" ", "_")
 	var geometry_phase: bool = idx == STAGE_GEOMETRY
 	var connections_phase: bool = idx == STAGE_CONNECTIONS
 	var props_phase: bool = idx == STAGE_PROPS_ASSETS
@@ -239,7 +449,7 @@ func _apply_phase(idx: int) -> void:
 			_lattice.set_tool(_LATTICE.TOOL_PORTAL)
 		_status.text = "Hover: select a first endpoint, then a highlighted legal target."
 	else:
-		_status.text = "Review validation problems and export readiness. Runtime launch is not connected yet."
+		_status.text = "Review validation problems, export readiness, or launch the validated runtime preview."
 	_sync_preview_layers()
 	_refresh_stage_checklist()
 	_update_persistent_guidance()
@@ -407,6 +617,8 @@ func _toggle_iso() -> void:
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_WINDOW_FOCUS_OUT or what == NOTIFICATION_APPLICATION_FOCUS_OUT:
 		_on_view_pointer_cancelled()
+	elif what == NOTIFICATION_WM_CLOSE_REQUEST:
+		_guard_unsaved(func() -> void: get_tree().quit())
 
 
 func _on_view_pointer_cancelled() -> void:
@@ -418,42 +630,278 @@ func _on_export_pressed() -> void:
 	if author == null:
 		_status.text = "export failed: DerelictAuthor missing"
 		return
+	_commit_session_document("Validate for export")
+	if not _compile_ok or _session == null or not _session.validation_matches_current():
+		_status.text = "export blocked: run a successful validation for the current source"
+		_show_issues([{"code": "StaleValidation", "severity": "error", "message": "The source changed after its last successful validation."}], [])
+		return
 	_export_dialog.popup_centered()
 
 
 func _on_export_dir(dir: String) -> void:
-	if author == null:
-		_status.text = "export failed: DerelictAuthor missing"
+	var bundle_name := _safe_bundle_name(_doc_id) + "_bundle"
+	var target := dir.path_join(bundle_name)
+	var result := _export_bundle(target, false)
+	if str(result.get("code", "")) == "overwrite_required":
+		_pending_bundle_target = target
+		_overwrite_dialog.dialog_text = "%s already exists. Replace the complete bundle?" % target
+		_overwrite_dialog.popup_centered()
+
+
+func _confirm_bundle_overwrite() -> void:
+	if _pending_bundle_target.is_empty():
 		return
+	var target := _pending_bundle_target
+	_pending_bundle_target = ""
+	_export_bundle(target, true)
+
+
+func _on_run_game_pressed() -> void:
+	_commit_session_document("Validate for runtime preview")
+	if not _compile_ok or _session == null or not _session.validation_matches_current():
+		_preview_failure("StaleValidation", "Run in Game requires a successful validation for the current source.")
+		return
+	if _content_root_path.is_empty() or not FileAccess.file_exists(_preview_runner_scene_path()):
+		_preview_failure("PreviewRunnerMissing", "The configured content root has no derelict builder preview scene.")
+		return
+	var hash := _session.current_source_hash()
+	var suffix := hash.substr(0, mini(12, hash.length()))
+	var target := "user://derelict_builder/preview/%s_%s_bundle" % [_safe_bundle_name(_doc_id), suffix]
+	var exported := _export_bundle(target, true)
+	if not bool(exported.get("ok", false)):
+		return
+	var absolute_bundle := ProjectSettings.globalize_path(target).simplify_path()
+	var manifest_path := absolute_bundle.path_join("manifest.json")
+	_preview_result_path = absolute_bundle.path_join("preview_result.json")
+	if FileAccess.file_exists(_preview_result_path):
+		DirAccess.remove_absolute(_preview_result_path)
+	var executable := OS.get_environment("DERELICT_PREVIEW_GODOT")
+	if executable.is_empty():
+		executable = OS.get_executable_path()
+	if executable.is_empty() or not FileAccess.file_exists(executable):
+		_preview_failure("GodotExecutableMissing", "Set DERELICT_PREVIEW_GODOT to a local Godot executable.")
+		return
+	var args := PackedStringArray()
+	if DisplayServer.get_name() == "headless":
+		args.append("--headless")
+	args.append_array(PackedStringArray([
+		"--path", _content_root_path,
+		"res://scenes/procgen/derelict_builder_preview.tscn",
+		"--", "--manifest", manifest_path,
+	]))
+	_preview_process_id = OS.create_process(executable, args, false)
+	if _preview_process_id <= 0:
+		_preview_failure("PreviewLaunchFailed", "Godot could not launch the Synaptic Sea preview process.")
+		return
+	_status.text = "Run in Game launched · waiting for runtime acceptance result…"
+	%RunGameBtn.disabled = true
+	%RunGameBtn.tooltip_text = "Runtime preview process %d is validating this bundle." % _preview_process_id
+	_preview_result_timer.start()
+
+
+func _poll_preview_result() -> void:
+	if not _preview_result_path.is_empty() and FileAccess.file_exists(_preview_result_path):
+		var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(_preview_result_path))
+		_preview_result_timer.stop()
+		if not (parsed is Dictionary):
+			_preview_failure("PreviewResultMalformed", "The runtime preview returned malformed result JSON.")
+			return
+		var result: Dictionary = parsed
+		if not bool(result.get("ok", false)):
+			var failures: Array = result.get("errors", [])
+			_preview_failure("RuntimeAcceptanceFailed", "; ".join(failures))
+			return
+		_status.text = "Run in Game ready · structural and authored runtime acceptance passed."
+		_issues.clear()
+		var index := _issues.add_item("Ready · Synaptic Sea runtime preview passed")
+		_issues.set_item_metadata(index, result)
+		_update_run_game_state()
+		return
+	if _preview_process_id > 0 and not OS.is_process_running(_preview_process_id):
+		_preview_result_timer.stop()
+		_preview_failure("PreviewExited", "The runtime preview exited before writing an acceptance result.")
+
+
+func _preview_failure(code: String, message: String) -> void:
+	_status.text = "Run in Game failed: %s" % message
+	_show_issues([{
+		"code": code,
+		"severity": "error",
+		"message": message,
+		"target_type": "stage",
+		"target_id": "validate_run",
+	}], [])
+	_preview_process_id = -1
+	_update_run_game_state()
+
+
+func _preview_runner_scene_path() -> String:
+	if _content_root_path.is_empty():
+		return ""
+	return _content_root_path.path_join("scenes/procgen/derelict_builder_preview.tscn")
+
+
+func _update_run_game_state() -> void:
+	if not is_node_ready() or not has_node("%RunGameBtn"):
+		return
+	var runner_ready := not _content_root_path.is_empty() and FileAccess.file_exists(_preview_runner_scene_path())
+	var validation_ready := _compile_ok and _session != null and _session.validation_matches_current()
+	var running := _preview_result_timer != null and not _preview_result_timer.is_stopped()
+	%RunGameBtn.disabled = not runner_ready or not validation_ready or running
+	if running:
+		%RunGameBtn.tooltip_text = "Waiting for the Synaptic Sea runtime acceptance result."
+	elif not runner_ready:
+		%RunGameBtn.tooltip_text = "Configure a Synaptic Sea content root with the manifest preview runner."
+	elif not validation_ready:
+		%RunGameBtn.tooltip_text = "Resolve validation errors and validate the current source first."
+	else:
+		%RunGameBtn.tooltip_text = "Export a temporary validated bundle and open it in The Synaptic Sea."
+
+
+func _export_bundle(target: String, overwrite: bool) -> Dictionary:
+	if author == null or _session == null:
+		return _export_failure("Extension", "DerelictAuthor is unavailable")
 	golden = _golden_from_lattice()
+	if not _compile_ok or not _session.validation_matches_current():
+		return _export_failure("StaleValidation", "The current source has not passed validation.")
 	var kit := str(golden.get("kit_id", "ship_structural_v0"))
 	var docs: Dictionary = author.export_playable(golden, kit)
 	var err := str(docs.get("error", ""))
 	if not err.is_empty():
-		_status.text = "export failed: %s" % err.split("\n")[0]
-		_show_issues([{"code": "Export", "detail": err}], [])
-		return
+		return _export_failure("Export", err)
 	var layout := str(docs.get("layout_json", ""))
-	var slice := str(docs.get("gameplay_slice_json", ""))
-	if layout.is_empty() or slice.is_empty():
-		_status.text = "export failed: empty documents"
-		return
-	var lp := dir.path_join("layout.json")
-	var gp := dir.path_join("gameplay_slice.json")
-	if not _write_text(lp, layout) or not _write_text(gp, slice):
-		return
-	_status.text = "exported %s and %s" % [lp, gp]
+	var gameplay := str(docs.get("gameplay_slice_json", ""))
+	var source := str(author.save_golden(golden))
+	if layout.is_empty() or gameplay.is_empty() or source.is_empty():
+		return _export_failure("Export", "Rust returned an empty source or runtime document.")
+	var layout_doc: Variant = JSON.parse_string(layout)
+	var generator_version := "unknown"
+	if layout_doc is Dictionary:
+		var generator: Variant = (layout_doc as Dictionary).get("generator", {})
+		if generator is Dictionary:
+			generator_version = str((generator as Dictionary).get("version", (generator as Dictionary).get("generator_version", "unknown")))
+	var manifest := {
+		"schema_version": "1.0.0",
+		"document_kind": "derelict_builder_bundle",
+		"source_hash": _session.current_source_hash(),
+		"source_path": "source.golden_area.json",
+		"layout_path": "layout.json",
+		"gameplay_slice_path": "gameplay_slice.json",
+		"kit_id": kit,
+		"kit_path": _kit_path(kit),
+		"source_schema": str(golden.get("schema_version", "1.0.0")),
+		"layout_schema": str(docs.get("layout_schema", "1.2.0")),
+		"gameplay_schema": str(docs.get("gameplay_schema", "1.1.0")),
+		"generator_version": generator_version,
+		"validation_result": "passed",
+		"generated_at_utc": Time.get_datetime_string_from_system(true, true),
+		"layout_hash": _sha256(layout),
+		"gameplay_slice_hash": _sha256(gameplay),
+	}
+	var files := {
+		"source.golden_area.json": source,
+		"layout.json": layout,
+		"gameplay_slice.json": gameplay,
+		"manifest.json": JSON.stringify(manifest, "\t"),
+	}
+	var result := _atomic_write_bundle(target, files, overwrite)
+	if not bool(result.get("ok", false)):
+		if str(result.get("code", "")) != "overwrite_required":
+			_export_failure("BundleWrite", str(result.get("error", "Unable to write export bundle")))
+		return result
+	_status.text = "Exported validated bundle: %s" % target
+	_issues.clear()
+	var index := _issues.add_item("Ready · Bundle exported · source 1.0.0 · layout 1.2.0 · gameplay 1.1.0")
+	_issues.set_item_metadata(index, manifest)
+	return result
 
 
-func _write_text(path: String, text: String) -> bool:
-	var f := FileAccess.open(path, FileAccess.WRITE)
-	if f == null:
-		_status.text = "export failed: cannot write %s" % path
+func _atomic_write_bundle(target: String, files: Dictionary, overwrite: bool) -> Dictionary:
+	var absolute := ProjectSettings.globalize_path(target).simplify_path()
+	var parent := absolute.get_base_dir()
+	if parent.is_empty() or absolute == parent:
+		return {"ok": false, "error": "Invalid bundle target"}
+	DirAccess.make_dir_recursive_absolute(parent)
+	var exists := DirAccess.dir_exists_absolute(absolute) or FileAccess.file_exists(absolute)
+	if exists and not overwrite:
+		return {"ok": false, "code": "overwrite_required", "path": target}
+	var stage := absolute + ".stage.%d" % Time.get_ticks_usec()
+	if DirAccess.make_dir_recursive_absolute(stage) != OK:
+		return {"ok": false, "error": "Cannot create bundle staging directory"}
+	for name in files:
+		var path := stage.path_join(str(name))
+		var file := FileAccess.open(path, FileAccess.WRITE)
+		if file == null:
+			_remove_tree(stage, parent)
+			return {"ok": false, "error": "Cannot write staged %s" % name}
+		var content := str(files[name])
+		file.store_string(content)
+		if not content.ends_with("\n"):
+			file.store_string("\n")
+		file.flush()
+		file.close()
+	var backup := absolute + ".backup.%d" % Time.get_ticks_usec()
+	if exists and DirAccess.rename_absolute(absolute, backup) != OK:
+		_remove_tree(stage, parent)
+		return {"ok": false, "error": "Cannot stage the existing bundle for replacement"}
+	if DirAccess.rename_absolute(stage, absolute) != OK:
+		if exists:
+			DirAccess.rename_absolute(backup, absolute)
+		_remove_tree(stage, parent)
+		return {"ok": false, "error": "Cannot finalize the staged bundle"}
+	if exists:
+		_remove_tree(backup, parent)
+	return {"ok": true, "path": target, "files": files.keys()}
+
+
+func _remove_tree(path: String, allowed_parent: String) -> bool:
+	var absolute := ProjectSettings.globalize_path(path).simplify_path()
+	var parent := ProjectSettings.globalize_path(allowed_parent).simplify_path()
+	if absolute.is_empty() or parent.is_empty() or absolute.get_base_dir() != parent:
 		return false
-	f.store_string(text)
-	if not text.ends_with("\n"):
-		f.store_string("\n")
-	return true
+	var dir := DirAccess.open(absolute)
+	if dir == null:
+		return DirAccess.remove_absolute(absolute) == OK
+	dir.list_dir_begin()
+	var name := dir.get_next()
+	while not name.is_empty():
+		var child := absolute.path_join(name)
+		if dir.current_is_dir():
+			if not _remove_tree(child, absolute):
+				dir.list_dir_end()
+				return false
+		elif DirAccess.remove_absolute(child) != OK:
+			dir.list_dir_end()
+			return false
+		name = dir.get_next()
+	dir.list_dir_end()
+	return DirAccess.remove_absolute(absolute) == OK
+
+
+func _sha256(content: String) -> String:
+	var context := HashingContext.new()
+	context.start(HashingContext.HASH_SHA256)
+	context.update(content.to_utf8_buffer())
+	return context.finish().hex_encode()
+
+
+func _kit_path(kit: String) -> String:
+	if _content_root_path.is_empty():
+		return ""
+	return _content_root_path.path_join("data/kits/%s.json" % kit)
+
+
+func _safe_bundle_name(value: String) -> String:
+	var out := value.strip_edges().to_lower()
+	for token in ["/", "\\", ":", "*", "?", "\"", "<", ">", "|"]:
+		out = out.replace(token, "_")
+	return out if not out.is_empty() else "untitled"
+
+
+func _export_failure(code: String, message: String) -> Dictionary:
+	_status.text = "export failed: %s" % message.split("\n")[0]
+	_show_issues([{"code": code, "severity": "error", "message": message}], [])
+	return {"ok": false, "code": code, "error": message}
 
 
 func _on_view_gui_input(event: InputEvent) -> void:
@@ -469,11 +917,14 @@ func _on_occupancy_changed() -> void:
 	_prune_room_vars()
 	_refresh_room_list()
 	_refresh_phases()
+	_commit_session_document("Geometry or connection edit")
 	_schedule_compile()
 
 
 func _on_room_selected(room: Dictionary) -> void:
 	_module_sel = {}
+	if _session != null:
+		_session.selection = {"type": "room", "id": int(room.get("id", 0))}
 	_preview.highlight_selection("", "")
 	if room.is_empty():
 		_inspector.clear()
@@ -491,6 +942,8 @@ func _on_room_selected(room: Dictionary) -> void:
 
 func _on_portal_selected(portal: Dictionary) -> void:
 	_module_sel = {}
+	if _session != null:
+		_session.selection = {"type": "portal", "from_cell": portal.get("from_cell", [])}
 	_preview.highlight_selection("", "")
 	if portal.is_empty():
 		_inspector.clear()
@@ -506,6 +959,8 @@ func _on_portal_selected(portal: Dictionary) -> void:
 
 func _on_vertical_selected(vertical: Dictionary) -> void:
 	_module_sel = {}
+	if _session != null:
+		_session.selection = {"type": "vertical", "from_cell": vertical.get("from_cell", [])}
 	_preview.highlight_selection("", "")
 	if vertical.is_empty():
 		_inspector.clear()
@@ -520,6 +975,8 @@ func _on_vertical_selected(vertical: Dictionary) -> void:
 
 func _on_prop_selected(prop: Dictionary) -> void:
 	_module_sel = {}
+	if _session != null:
+		_session.selection = {"type": "prop", "id": int(prop.get("id", 0))}
 	_preview.highlight_selection("", "")
 	if prop.is_empty():
 		_inspector.clear()
@@ -535,11 +992,14 @@ func _on_prop_selected(prop: Dictionary) -> void:
 
 func _on_props_changed() -> void:
 	golden = _golden_from_lattice()
+	_commit_session_document("Prop edit")
 	_refresh_prop_preview()
 
 
 func _on_hazard_selected(zone: Dictionary) -> void:
 	_module_sel = {}
+	if _session != null:
+		_session.selection = {"type": "hazard", "id": str(zone.get("id", ""))}
 	_preview.highlight_selection("", "")
 	if zone.is_empty():
 		_inspector.clear()
@@ -557,6 +1017,7 @@ func _on_hazard_selected(zone: Dictionary) -> void:
 
 func _on_hazards_changed() -> void:
 	golden = _golden_from_lattice()
+	_commit_session_document("Gameplay edit")
 	_preview.apply_hazards(_lattice.get_hazards())
 
 
@@ -756,10 +1217,13 @@ func _on_module_override_set(ov_map: String, key: String, module_id: String) -> 
 	if not _module_sel.is_empty():
 		_module_sel["module_id"] = module_id
 		_module_sel["overridden"] = true
+	_commit_session_document("Module override")
 	_schedule_compile()
 
 
 func _on_tool_changed(_t: String) -> void:
+	if _session != null:
+		_session.active_tool = _t
 	_highlight_armed_tool()
 	_update_persistent_guidance()
 
@@ -813,6 +1277,7 @@ func _sync_deck_label() -> void:
 
 
 func _resolve_content() -> void:
+	_content_root_path = ""
 	if author == null:
 		_content_offline = true
 		_banner.visible = true
@@ -820,6 +1285,7 @@ func _resolve_content() -> void:
 		_root_label.text = "content root: (extension missing)"
 		_preview.configure("", true)
 		_bind_palettes()
+		_update_run_game_state()
 		return
 	var info: Dictionary = _content.resolve()
 	_content_offline = bool(info.get("offline", true))
@@ -830,8 +1296,10 @@ func _resolve_content() -> void:
 		author.set_content_root("")
 		_preview.configure("", true)
 		_bind_palettes()
+		_update_run_game_state()
 		return
 	var path := str(info.get("path", ""))
+	_content_root_path = path
 	_root_label.text = "content root: %s (%s)" % [path, info.get("source", "")]
 	_preview.configure(path, false)
 	var result: Dictionary = author.set_content_root(path)
@@ -843,6 +1311,7 @@ func _resolve_content() -> void:
 			msg += ": " + str(errs[0])
 		_banner_label.text = msg
 	_bind_palettes()
+	_update_run_game_state()
 
 
 func _bind_palettes() -> void:
@@ -882,6 +1351,8 @@ func _run_compile() -> void:
 		_set_phase2_ready(false)
 		return
 	var result: Dictionary = author.compile(golden)
+	if _session != null:
+		_session.set_compile_result(result, golden)
 	if result.has("error"):
 		_show_issues([{"code": "Compile", "detail": str(result["error"])}], [])
 		_preview.apply_plan({})
@@ -897,13 +1368,9 @@ func _run_compile() -> void:
 	var plan: Dictionary = result.get("plan", {})
 	var zones: Dictionary = result.get("zones", {})
 	var occupancy_ok: bool = not _lattice.get_rooms().is_empty()
-	var ok: bool = issues.is_empty() and occupancy_ok
+	var ok: bool = issues.is_empty() and stale.is_empty() and occupancy_ok
 	_lattice.set_compile_result(zones, plan, ok)
 	_last_plan = plan
-	if _prune_stale_module_overrides():
-		golden = _golden_from_lattice()
-		_schedule_compile()
-		return
 	_capture_dressed(plan)
 	_preview.set_active_deck(_lattice.active_deck)
 	_preview.apply_plan(plan)
@@ -941,6 +1408,7 @@ func _set_phase2_ready(ok: bool) -> void:
 		_lattice.set_slot_overlay_visible(true)
 	_refresh_stage_checklist()
 	_update_persistent_guidance()
+	_update_run_game_state()
 
 
 func _show_empty_document_state() -> void:
@@ -967,7 +1435,9 @@ func _stage_prerequisite(stage: int) -> String:
 			if not has_rooms:
 				return "Paint at least one room in Geometry before validation or export."
 			if not _compile_ok:
-				return "Resolve every validation error before export; Run in Game is not connected yet."
+				return "Resolve every validation error before export or Run in Game."
+			if _content_root_path.is_empty() or not FileAccess.file_exists(_preview_runner_scene_path()):
+				return "Configure a Synaptic Sea content root containing the builder preview scene."
 	return ""
 
 
@@ -998,7 +1468,7 @@ func _refresh_stage_checklist() -> void:
 	_stage_blocker.visible = true
 	if blocker.is_empty():
 		if selected == STAGE_VALIDATE_RUN:
-			_stage_blocker_label.text = "Warning: export can be validated here; Run in Game remains blocked until runtime acceptance exists."
+			_stage_blocker_label.text = "Ready: export a validated bundle or launch it through the Synaptic Sea runtime preview."
 		elif selected == STAGE_GAMEPLAY:
 			_stage_blocker_label.text = "Warning: authored gameplay is preview-only until each behavior passes an in-game acceptance test."
 		else:
@@ -1058,8 +1528,13 @@ func _on_problem_selected(index: int) -> void:
 	var meta: Variant = _issues.get_item_metadata(index)
 	if meta is Dictionary:
 		var problem: Dictionary = meta
-		if problem.has("deck"):
+		if problem.has("deck") and problem.get("deck") != null:
 			_lattice.set_active_deck(int(problem["deck"]))
+		var cell_variant: Variant = problem.get("cell", null)
+		if cell_variant is Array and cell_variant.size() >= 3:
+			_lattice.focus_diagnostic(Vector3i(
+				int(cell_variant[0]), int(cell_variant[1]), int(cell_variant[2])),
+				str(problem.get("target_type", "")))
 		var target := str(problem.get("target_id", problem.get("id", "")))
 		_status.text = "Problem focus: %s" % (target if not target.is_empty() else _issues.get_item_text(index))
 	else:
@@ -1154,14 +1629,96 @@ func _ensure_vars(id: int) -> Dictionary:
 	return _room_vars[k]
 
 
+func _commit_session_document(label: String) -> void:
+	if _hydrating_document or _session == null or author == null:
+		return
+	golden = _golden_from_lattice()
+	_session.commit_document(golden, label)
+
+
+func _apply_source_document(document: Dictionary) -> bool:
+	if document.is_empty():
+		_status.text = "Document error: source is empty"
+		return false
+	_hydrating_document = true
+	var next_doc := document.duplicate(true)
+	var result: Dictionary = _lattice.hydrate_document(next_doc)
+	if not str(result.get("error", "")).is_empty():
+		_hydrating_document = false
+		_status.text = "Document error: %s" % result["error"]
+		return false
+	_doc_id = str(next_doc.get("id", "untitled"))
+	_display_name = str(next_doc.get("display_name", "Untitled"))
+	_scope = str(next_doc.get("scope", "room"))
+	_kit_id = str(next_doc.get("kit_id", "ship_structural_v0"))
+	var stamp_value: Variant = next_doc.get("stamp", null)
+	_stamp_meta = (stamp_value as Dictionary).duplicate(true) if stamp_value is Dictionary else null
+	_entry_room = str(next_doc.get("entry_room", ""))
+	_goal_room = str(next_doc.get("goal_room", ""))
+	_module_overrides = _normalized_overrides(next_doc.get("module_overrides", {}))
+	_edge_override_kinds.clear()
+	_room_vars = _normalized_room_vars(next_doc.get("room_vars", {}))
+	golden = next_doc
+	_sync_entry_goal()
+	_prune_room_vars()
+	_refresh_room_list()
+	_inspector.clear()
+	_module_sel = {}
+	_last_plan = {}
+	_preview.apply_plan({})
+	_preview.apply_props(_lattice.get_props(), _palettes)
+	_preview.apply_hazards(_lattice.get_hazards())
+	_hydrating_document = false
+	_on_session_dirty_changed(_session.has_unsaved_changes() if _session != null else false)
+	_refresh_phases()
+	_schedule_compile()
+	return true
+
+
+func _reset_document_metadata() -> void:
+	_doc_id = "untitled"
+	_display_name = "Untitled"
+	_scope = "room"
+	_kit_id = "ship_structural_v0"
+	_stamp_meta = null
+	_entry_room = ""
+	_goal_room = ""
+	_room_vars = {}
+	_module_overrides = {"floors": {}, "ceilings": {}, "edges": {}}
+
+
+func _normalized_overrides(value: Variant) -> Dictionary:
+	var source: Dictionary = value if value is Dictionary else {}
+	var result := {"floors": {}, "ceilings": {}, "edges": {}}
+	for layer in result:
+		var layer_value: Variant = source.get(layer, {})
+		if layer_value is Dictionary:
+			result[layer] = (layer_value as Dictionary).duplicate(true)
+	return result
+
+
+## Internally the inspector is keyed by numeric room id. Loading accepts both
+## the legacy numeric keys and preferred stable-id keys without losing values.
+func _normalized_room_vars(value: Variant) -> Dictionary:
+	var source: Dictionary = value if value is Dictionary else {}
+	var result: Dictionary = {}
+	for room in _lattice.get_rooms():
+		var numeric := str(int(room.get("id", 0)))
+		var stable := str(room.get("stable_id", ""))
+		var vars_value: Variant = source.get(stable, source.get(numeric, {}))
+		if vars_value is Dictionary:
+			result[numeric] = (vars_value as Dictionary).duplicate(true)
+	return result
+
+
 func _empty_golden() -> Dictionary:
 	return {
 		"schema_version": "1.0.0",
 		"document_kind": "golden_area",
 		"id": _doc_id,
 		"display_name": _display_name,
-		"scope": "room",
-		"kit_id": "ship_structural_v0",
+		"scope": _scope,
+		"kit_id": _kit_id,
 		"cell_size_m": 4.0,
 		"deck_height_m": 4.0,
 		"entry_room": "",
@@ -1177,6 +1734,7 @@ func _empty_golden() -> Dictionary:
 			"arc_zones": [],
 			"radiation_zones": [],
 		},
+		"stamp": _stamp_meta.duplicate(true) if _stamp_meta is Dictionary else null,
 	}
 
 
@@ -1201,13 +1759,12 @@ func _golden_from_lattice() -> Dictionary:
 			"deck": int(r["deck"]),
 			"cells": cells,
 		})
-	var scope := "room"
-	if rooms.size() > 1:
-		scope = "area"
+	var scope := "area" if rooms.size() > 1 else _scope
 	var g := _empty_golden()
 	g["id"] = _doc_id
 	g["display_name"] = _display_name
 	g["scope"] = scope
+	g["kit_id"] = _kit_id
 	g["entry_room"] = _entry_room
 	g["goal_room"] = _goal_room
 	var portals: Array = _untyped_array(_lattice.get_portals())
@@ -1219,7 +1776,12 @@ func _golden_from_lattice() -> Dictionary:
 		"portals": portals,
 		"verticals": _untyped_array(_lattice.get_verticals()),
 	}
-	g["room_vars"] = _room_vars.duplicate(true)
+	var source_vars: Dictionary = {}
+	for room in _lattice.get_rooms():
+		var numeric := str(int(room.get("id", 0)))
+		if _room_vars.has(numeric):
+			source_vars[str(room.get("stable_id", numeric))] = (_room_vars[numeric] as Dictionary).duplicate(true)
+	g["room_vars"] = source_vars
 	g["hazards"] = _lattice.get_hazards_dto()
 	var props: Array = []
 	for p in _lattice.get_props():
@@ -1232,6 +1794,7 @@ func _golden_from_lattice() -> Dictionary:
 		"ceilings": (_module_overrides.get("ceilings", {}) as Dictionary).duplicate(true),
 		"edges": (_module_overrides.get("edges", {}) as Dictionary).duplicate(true),
 	}
+	g["stamp"] = _stamp_meta.duplicate(true) if _stamp_meta is Dictionary else null
 	return g
 
 

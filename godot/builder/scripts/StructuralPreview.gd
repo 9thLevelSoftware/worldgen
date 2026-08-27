@@ -695,7 +695,7 @@ func _clear_pieces() -> void:
 		return
 	for c in _pieces.get_children():
 		_pieces.remove_child(c)
-		c.free()
+		c.queue_free()
 
 
 func _clear_props() -> void:
@@ -703,7 +703,7 @@ func _clear_props() -> void:
 		return
 	for c in _prop_root.get_children():
 		_prop_root.remove_child(c)
-		c.free()
+		c.queue_free()
 
 
 func _clear_hazards() -> void:
@@ -711,7 +711,7 @@ func _clear_hazards() -> void:
 		return
 	for c in _hazard_root.get_children():
 		_hazard_root.remove_child(c)
-		c.free()
+		c.queue_free()
 
 
 func _clear_cache() -> void:

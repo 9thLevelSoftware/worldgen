@@ -6,7 +6,7 @@ use derelict_core::authoring::{compile_authored, GoldenArea};
 use derelict_core::rng;
 use derelict_core::role::Role;
 use derelict_core::stages::hull::Mask;
-use derelict_core::structural::compile::{compile, DefaultModulePicker};
+use derelict_core::structural::compile::{compile, DefaultModulePicker, WALL_MODULE};
 use derelict_core::structural::plan::{Cell, EdgeKind, PortalIntent, RoomSpec, Topology, NO_ROOM};
 use derelict_core::structural::validate::{validate, ValidationPolicy};
 use derelict_core::topology::{
@@ -261,6 +261,23 @@ fn west_airlock_placed() -> (PlacedTopology, Vec<Mask>) {
         room_links: vec![(1, 2)],
     };
     (placed, masks)
+}
+
+#[test]
+fn solid_edge_placements_keep_the_edge_centered_wall_contract() {
+    let (placed, _) = west_airlock_placed();
+    let plan = compile(&placed.topology, &DefaultModulePicker);
+
+    let decorated: Vec<_> = plan
+        .placements
+        .iter()
+        .filter(|edge| edge.kind == EdgeKind::Solid && edge.module_id != WALL_MODULE)
+        .map(|edge| (&edge.edge_key, &edge.module_id))
+        .collect();
+    assert!(
+        decorated.is_empty(),
+        "vertex-centered modules must not replace edge-centered SOLID placements: {decorated:?}"
+    );
 }
 
 #[test]
