@@ -21,7 +21,7 @@ use derelict_core::structural::validate::{
 };
 use derelict_core::topology::room_path;
 use derelict_core::Role;
-use godot::builtin::{GString, PackedStringArray, VarArray, VarDictionary, Variant, VariantType};
+use godot::builtin::{Array, GString, PackedStringArray, VarArray, VarDictionary, Variant, VariantType};
 use godot::classes::RefCounted;
 use godot::meta::ToGodot;
 use godot::obj::Base;
@@ -897,6 +897,25 @@ fn dict_to_json(dict: &VarDictionary) -> Result<Value, String> {
     Ok(Value::Object(map))
 }
 
+fn array_variant_to_json(v: &Variant) -> Result<Value, String> {
+    if let Ok(arr) = v.try_to::<VarArray>() {
+        let mut out = Vec::new();
+        for x in arr.iter_shared() {
+            out.push(variant_to_json(&x)?);
+        }
+        return Ok(Value::Array(out));
+    }
+    // GDScript `Array[Dictionary]` is a typed array; godot-rust rejects it as VarArray.
+    if let Ok(arr) = v.try_to::<Array<VarDictionary>>() {
+        let mut out = Vec::new();
+        for d in arr.iter_shared() {
+            out.push(dict_to_json(&d)?);
+        }
+        return Ok(Value::Array(out));
+    }
+    Err(format!("cannot convert array to JSON: {v}"))
+}
+
 fn variant_key(key: &Variant) -> String {
     if let Ok(s) = key.try_to::<GString>() {
         return s.to_string();
@@ -929,14 +948,7 @@ fn variant_to_json(v: &Variant) -> Result<Value, String> {
                 .map(|s| s.to_string())
                 .unwrap_or_default(),
         )),
-        VariantType::ARRAY => {
-            let arr: VarArray = v.try_to().map_err(|e| e.to_string())?;
-            let mut out = Vec::new();
-            for x in arr.iter_shared() {
-                out.push(variant_to_json(&x)?);
-            }
-            Ok(Value::Array(out))
-        }
+        VariantType::ARRAY => array_variant_to_json(v),
         VariantType::DICTIONARY => {
             let d: VarDictionary = v.try_to().map_err(|e| e.to_string())?;
             dict_to_json(&d)

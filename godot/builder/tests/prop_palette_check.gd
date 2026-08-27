@@ -199,12 +199,13 @@ func _check_shared_solid_facing() -> void:
 	if not lattice.paint_cell(Vector3i(0, 0, 0)):
 		_fail("paint west room cell")
 	lattice.create_room()
+	lattice.active_role = "dock"
 	if not lattice.paint_cell(Vector3i(1, 0, 0)):
 		_fail("paint east room cell")
 	lattice.set_tool(Lattice.TOOL_PROP)
 	lattice.arm_prop({
 		"group": "furnishing",
-		"role": "airlock",
+		"role": "dock",
 		"proto": "suit_locker",
 		"kind": "Container",
 		"place": "WallAdjacent",
@@ -214,7 +215,7 @@ func _check_shared_solid_facing() -> void:
 	# Compile emits the partition once on the BTreeMap-first cell (west, dir east).
 	lattice.set_compile_result({
 		"airlock_01": {"reserved_cells": [], "wall_slots": [[0, 0, 0]], "center_slots": []},
-		"airlock_02": {"reserved_cells": [], "wall_slots": [[1, 0, 0]], "center_slots": []},
+		"dock_02": {"reserved_cells": [], "wall_slots": [[1, 0, 0]], "center_slots": []},
 	}, {
 		"edges": {
 			"shared": {

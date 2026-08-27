@@ -4,6 +4,8 @@ extends Node3D
 ## GLTFDocument from the content root. Missing files fall back to CSG.
 ## Never instances wrapper .tscn scenes or reads processed_asset_source.
 
+const _LATTICE := preload("res://scripts/OccupancyLattice.gd")
+
 ## v1 preview kit only. Do not interpolate {kit_id}; ithappy lives under ithappy/.
 const KIT_ID := "ship_structural_v0"
 const CELL_SIZE_M := 4.0
@@ -145,6 +147,59 @@ func has_kit_floor_glbs() -> bool:
 ## Hide occupancy CSG floors only when every occupied cell has a floor GLB.
 func covers_occupied_floors() -> bool:
 	return floor_placement_count > 0 and floor_glb_count == floor_placement_count
+
+
+func set_floor_layer_visible(visible: bool) -> void:
+	if _pieces == null:
+		return
+	for child in _pieces.get_children():
+		if str(child.get_meta("layer", "")) == "floor":
+			child.visible = visible
+
+
+func set_kit_visible(visible: bool) -> void:
+	_ensure_pieces()
+	_pieces.visible = visible
+
+
+func apply_role_tints(rooms: Array) -> void:
+	var role_of: Dictionary = {}
+	for rec_v in rooms:
+		if rec_v is Dictionary:
+			role_of[str(rec_v.get("stable_id", ""))] = str(rec_v.get("role", ""))
+	if _pieces == null:
+		return
+	for child in _pieces.get_children():
+		if str(child.get_meta("layer", "")) != "floor":
+			continue
+		var role := str(role_of.get(str(child.get_meta("room_id", "")), ""))
+		var col: Color = _LATTICE.ROLE_COLORS.get(role, Color(0.55, 0.58, 0.6))
+		_tint_node(child, col)
+
+
+func _tint_node(n: Node, col: Color) -> void:
+	var tinted := Color(0.72, 0.72, 0.74).lerp(col, 0.7)
+	if n is MeshInstance3D:
+		var mi := n as MeshInstance3D
+		var src: Material = mi.get_active_material(0)
+		var dup: Material
+		if src != null:
+			dup = src.duplicate() as Material
+		else:
+			dup = StandardMaterial3D.new()
+		if dup is BaseMaterial3D:
+			(dup as BaseMaterial3D).albedo_color = tinted
+		mi.set_surface_override_material(0, dup)
+	elif n is GeometryInstance3D:
+		var gi := n as GeometryInstance3D
+		var mat: Material = gi.material_override
+		if mat == null:
+			mat = StandardMaterial3D.new()
+			gi.material_override = mat
+		if mat is BaseMaterial3D:
+			(mat as BaseMaterial3D).albedo_color = tinted
+	for c in n.get_children():
+		_tint_node(c, col)
 
 
 func piece_nodes() -> Array:
@@ -301,6 +356,7 @@ func _spawn_layer(items: Variant, layer: String, always: bool) -> void:
 		node.set_meta("kind", str(rec.get("kind", rec.get("state", ""))))
 		node.set_meta("state", str(rec.get("state", rec.get("kind", ""))))
 		node.set_meta("portal", bool(rec.get("portal", false)))
+		node.set_meta("room_id", str(rec.get("room_id", "")))
 		_pieces.add_child(node)
 
 

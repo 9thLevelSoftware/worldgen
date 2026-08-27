@@ -66,7 +66,7 @@ func _ready() -> void:
 	_sync_deck_label()
 	_refresh_phases()
 	_apply_phase(0)
-	_status.text = "Paint LMB · RMB erase · Portal: click A then neighbor · Vertical: stacked N/N±1 · Assign module: click compiled floor/wall/portal · Hazards: Phase 4 · Del removes selected · Esc cancels pending · Q/E deck"
+	_status.text = "Paint LMB · RMB erase · Role is the brush (inspector changes a laid room) · Portal: click A then neighbor · Vertical: stacked N/N±1 · Del removes selected · Esc cancels pending · Q/E deck"
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -201,7 +201,8 @@ func _apply_phase(idx: int) -> void:
 	else:
 		if _lattice.active_tool == _LATTICE.TOOL_PROP or _lattice.active_tool == _LATTICE.TOOL_ASSET or _lattice.active_tool == _LATTICE.TOOL_HAZARD:
 			_lattice.set_tool(_LATTICE.TOOL_PAINT)
-		_status.text = "Paint LMB · RMB erase · Portal: click A then neighbor · Vertical: stacked N/N±1 · Assign module: click compiled floor/wall/portal · Hazards: Phase 4 · Del removes selected · Q/E deck"
+		_status.text = "Paint LMB · RMB erase · Role is the brush (inspector changes a laid room) · Portal: click A then neighbor · Vertical: stacked N/N±1 · Del removes selected · Q/E deck"
+	_sync_preview_layers()
 
 
 func _build_tools() -> void:
@@ -329,7 +330,7 @@ func _build_roles() -> void:
 
 
 func _on_role_pressed(role: String) -> void:
-	_lattice.stamp_role(role)
+	_lattice.arm_role(role)
 	_highlight_armed_role()
 
 
@@ -339,7 +340,11 @@ func _highlight_armed_role() -> void:
 		var b := child as Button
 		if b == null:
 			continue
-		b.modulate = Color(1.15, 1.1, 0.65) if b.text == armed else Color.WHITE
+		var col: Color = _LATTICE.ROLE_COLORS.get(b.text, Color(0.7, 0.72, 0.75))
+		if b.text == armed:
+			b.modulate = col.lightened(0.25)
+		else:
+			b.modulate = col.lerp(Color(0.55, 0.56, 0.6), 0.2)
 
 
 func _toggle_iso() -> void:
@@ -609,7 +614,7 @@ func _enrich_module_sel(sel: Dictionary) -> Dictionary:
 		var role := str(next.get("role", ""))
 		next["kind"] = "ceiling"
 		next["state"] = ""
-		var cell := next.get("cell", _cell3_from_key(key))
+		var cell: Variant = next.get("cell", _cell3_from_key(key))
 		next["alt_label"] = "Inspect floor"
 		next["alt"] = {
 			"ov_map": "floors",
@@ -730,7 +735,7 @@ func _on_tool_changed(_t: String) -> void:
 
 
 func _refresh_phases() -> void:
-	var has_occ := not _lattice.get_rooms().is_empty()
+	var has_occ: bool = not _lattice.get_rooms().is_empty()
 	_phase_bar.set_tab_disabled(2, not has_occ)
 	if not has_occ and _phase_bar.current_tab == 2:
 		_phase_bar.current_tab = 0
@@ -836,7 +841,7 @@ func _run_compile() -> void:
 		_preview.apply_props([], _palettes)
 		_preview.apply_hazards(_lattice.get_hazards())
 		_lattice.set_compile_result({}, {}, false)
-		_lattice.set_occupancy_floors_visible(true)
+		_sync_preview_layers()
 		_set_phase2_ready(false)
 		return
 	var result: Dictionary = author.compile(golden)
@@ -846,7 +851,7 @@ func _run_compile() -> void:
 		_preview.apply_props([], _palettes)
 		_preview.apply_hazards(_lattice.get_hazards())
 		_lattice.set_compile_result({}, {}, false)
-		_lattice.set_occupancy_floors_visible(true)
+		_sync_preview_layers()
 		_set_phase2_ready(false)
 		return
 	var issues: Array = result.get("issues", [])
@@ -865,10 +870,10 @@ func _run_compile() -> void:
 	_capture_dressed(plan)
 	_preview.set_active_deck(_lattice.active_deck)
 	_preview.apply_plan(plan)
+	_preview.apply_role_tints(_lattice.get_rooms())
 	_preview.apply_props(_lattice.get_props(), _palettes)
 	_preview.apply_hazards(_lattice.get_hazards())
-	# Hide occupancy CSG floors only when every occupied cell has a floor GLB.
-	_lattice.set_occupancy_floors_visible(not _preview.covers_occupied_floors())
+	_sync_preview_layers()
 	if issues.is_empty() and stale.is_empty() and _issues.item_count > 0:
 		_issues.set_item_text(0, "Compile OK · %s" % _preview.status_text())
 	else:
@@ -877,6 +882,20 @@ func _run_compile() -> void:
 	_set_phase2_ready(ok)
 	if not _module_sel.is_empty():
 		_bind_module_sel(_module_sel)
+
+
+func _sync_preview_layers() -> void:
+	var paint_phase: bool = _phase_bar != null and _phase_bar.current_tab == 0
+	if paint_phase:
+		# Kit walls/ceilings bury occupancy tiles in iso view. Floor plan is
+		# the role-colored paint, not ship_structural_v0 modules.
+		_lattice.set_occupancy_floors_visible(true)
+		_preview.set_kit_visible(false)
+	else:
+		var covered: bool = _preview.covers_occupied_floors()
+		_lattice.set_occupancy_floors_visible(not covered)
+		_preview.set_kit_visible(true)
+		_preview.set_floor_layer_visible(true)
 
 
 func _set_phase2_ready(ok: bool) -> void:
@@ -988,6 +1007,13 @@ func _empty_golden() -> Dictionary:
 	}
 
 
+func _untyped_array(arr) -> Array:
+	var out: Array = []
+	for x in arr:
+		out.append(x)
+	return out
+
+
 func _golden_from_lattice() -> Dictionary:
 	var rooms: Array = []
 	for r in _lattice.get_rooms():
@@ -1011,14 +1037,14 @@ func _golden_from_lattice() -> Dictionary:
 	g["scope"] = scope
 	g["entry_room"] = _entry_room
 	g["goal_room"] = _goal_room
-	var portals: Array = _lattice.get_portals()
+	var portals: Array = _untyped_array(_lattice.get_portals())
 	for p in portals:
 		if p is Dictionary:
 			(p as Dictionary).erase("module_id")
 	g["topology"] = {
 		"rooms": rooms,
 		"portals": portals,
-		"verticals": _lattice.get_verticals(),
+		"verticals": _untyped_array(_lattice.get_verticals()),
 	}
 	g["room_vars"] = _room_vars.duplicate(true)
 	g["hazards"] = _lattice.get_hazards_dto()

@@ -653,10 +653,18 @@ func cancel_pending() -> void:
 	hover_info.emit("pending click cancelled")
 
 
+## Arm the occupancy brush. Does not rewrite rooms already painted, and does
+## not deselect — touching same-role cells stay one room.
+func arm_role(role: String) -> void:
+	active_role = role
+
+
+## Rewrite the selected room's role. Inspector and tests use this; the role
+## palette does not — changing the brush must not recolor laid floors.
 func stamp_role(role: String) -> void:
 	active_role = role
-	# Role palette is a room stamp. Drop portal/vertical/prop/module/hazard selection so the
-	# inspector and Delete/Backspace match the highlighted room.
+	# Drop portal/vertical/prop/module/hazard selection so the inspector and
+	# Delete/Backspace match the highlighted room.
 	var converted := _selected_kind == "portal" or _selected_kind == "vertical" or _selected_kind == "prop" or _selected_kind == "piece" or _selected_kind == "hazard"
 	if converted:
 		_selected_kind = "room"
@@ -676,6 +684,8 @@ func stamp_role(role: String) -> void:
 		return
 	if changed:
 		room["role"] = role
+		_coalesce_touching_same_role()
+		room = get_selected()
 	var hz_changed := _refresh_hazard_rooms()
 	_sync_floors()
 	_sync_links()
@@ -697,6 +707,8 @@ func apply_room_edit(edited: Dictionary) -> void:
 		var role := str(edited.get("role", ""))
 		if not role.is_empty():
 			r["role"] = role
+			_coalesce_touching_same_role()
+			r = get_selected()
 		var hz_changed := _refresh_hazard_rooms()
 		_sync_floors()
 		_sync_links()
@@ -994,15 +1006,9 @@ func _try_lmb(cell: Vector3i) -> bool:
 func _try_lmb_paint(cell: Vector3i) -> bool:
 	var key := _key(cell)
 	if _occupancy.has(key):
-		var id := int(_occupancy[key])
-		# Re-click of the active room is inspect-only so inspector role
-		# edits are not overwritten by the armed palette stamp.
-		var stamped := false
-		if id != _selected_id:
-			stamped = _stamp_room_id(id, active_role)
-		select_room_id(id)
-		if stamped:
-			occupancy_changed.emit()
+		# Occupied click inspects. Role changes for existing rooms go through
+		# the inspector, not the armed brush.
+		select_room_id(int(_occupancy[key]))
 		return false
 	return _try_paint(cell)
 
@@ -1012,25 +1018,23 @@ func _try_paint(cell: Vector3i) -> bool:
 	if reason != "":
 		hover_info.emit(reason)
 		return false
-	var room := get_selected()
-	var need_new := room.is_empty()
-	if not need_new and not (room["cells"] as Array).is_empty():
-		if int(room["deck"]) != cell.z:
-			need_new = true
-	if need_new:
+	var room := _room_to_extend(cell)
+	if room.is_empty():
 		room = _make_room(active_role, cell.z)
 		_rooms.append(room)
-		_selected_id = int(room["id"])
 	if (room["cells"] as Array).is_empty():
 		room["deck"] = cell.z
 	(room["cells"] as Array).append(Vector2i(cell.x, cell.y))
 	_occupancy[_key(cell)] = int(room["id"])
+	_selected_id = int(room["id"])
 	_selected_kind = "room"
 	_selected_portal = -1
 	_selected_vertical = -1
 	_selected_prop = -1
 	_asset_sel = {}
 	_selected_hazard = -1
+	_coalesce_touching_same_role()
+	room = get_selected()
 	_prune_links()
 	var hz_pruned := _prune_hazards()
 	_sync_deck_count()
@@ -1099,14 +1103,79 @@ func _paint_block_reason(cell: Vector3i) -> String:
 		return "blocked: soft AABB 64×64"
 	if _occupancy.has(_key(cell)):
 		return "blocked: occupancy overlap"
-	var room := get_selected()
+	return ""
+
+
+func _room_to_extend(cell: Vector3i) -> Dictionary:
+	var xy := Vector2i(cell.x, cell.y)
+	var selected := get_selected()
+	if _room_accepts_cell(selected, cell.z, xy):
+		return selected
+	for r in _rooms:
+		if _room_accepts_cell(r, cell.z, xy):
+			return r
+	return {}
+
+
+func _rooms_share_cardinal(a: Dictionary, b: Dictionary) -> bool:
+	if a.is_empty() or b.is_empty():
+		return false
+	for c in b["cells"]:
+		var p: Vector2i = c
+		if _shares_cardinal(a, p):
+			return true
+	return false
+
+
+func _merge_room_into(keep: Dictionary, drop: Dictionary) -> void:
+	var kid := int(keep["id"])
+	var did := int(drop["id"])
+	var deck := int(keep["deck"])
+	var cells: Array = keep["cells"]
+	for c in drop["cells"]:
+		var p: Vector2i = c
+		cells.append(p)
+		_occupancy[_key(Vector3i(p.x, p.y, deck))] = kid
+	for p in _portals:
+		if int(p.get("from_room", 0)) == did:
+			p["from_room"] = kid
+		if int(p.get("to_room", 0)) == did:
+			p["to_room"] = kid
+	for v in _verticals:
+		if int(v.get("from_room", 0)) == did:
+			v["from_room"] = kid
+		if int(v.get("to_room", 0)) == did:
+			v["to_room"] = kid
+	if _selected_id == did:
+		_selected_id = kid
+
+
+func _coalesce_touching_same_role() -> void:
+	var i := 0
+	while i < _rooms.size():
+		var room: Dictionary = _rooms[i]
+		var absorbed := false
+		var j := i + 1
+		while j < _rooms.size():
+			var other: Dictionary = _rooms[j]
+			if str(other.get("role", "")) == str(room.get("role", "")) and int(other.get("deck", -1)) == int(room.get("deck", -2)) and _rooms_share_cardinal(room, other):
+				_merge_room_into(room, other)
+				_rooms.remove_at(j)
+				absorbed = true
+			else:
+				j += 1
+		if not absorbed:
+			i += 1
+
+
+func _room_accepts_cell(room: Dictionary, deck: int, xy: Vector2i) -> bool:
 	if room.is_empty() or (room["cells"] as Array).is_empty():
-		return ""
-	if int(room["deck"]) != cell.z:
-		return ""
-	if _shares_cardinal(room, Vector2i(cell.x, cell.y)):
-		return ""
-	return "blocked: not 4-adjacent to room"
+		return false
+	if str(room.get("role", "")) != active_role:
+		return false
+	if int(room.get("deck", -1)) != deck:
+		return false
+	return _shares_cardinal(room, xy)
 
 
 func _shares_cardinal(room: Dictionary, cell: Vector2i) -> bool:
@@ -1120,19 +1189,6 @@ func _shares_cardinal(room: Dictionary, cell: Vector2i) -> bool:
 
 func _in_aabb(x: int, y: int) -> bool:
 	return x >= AABB_MIN and x <= AABB_MAX and y >= AABB_MIN and y <= AABB_MAX
-
-
-func _stamp_room_id(id: int, role: String) -> bool:
-	for r in _rooms:
-		if int(r["id"]) != id:
-			continue
-		if str(r["role"]) == role:
-			return false
-		r["role"] = role
-		if _refresh_hazard_rooms():
-			hazards_changed.emit()
-		return true
-	return false
 
 
 func _refresh_ghost() -> void:
@@ -1256,12 +1312,7 @@ func _update_paint_ghost(cell: Vector3i) -> void:
 			if int(r["id"]) == id:
 				sid = str(r["stable_id"])
 				break
-		if id == _selected_id or sid.is_empty() or str(_room_role(id)) == active_role:
-			hover_info.emit("select %s  (%d,%d deck %d)" % [sid, cell.x, cell.y, cell.z])
-		else:
-			hover_info.emit("stamp %s on %s  (%d,%d deck %d)" % [
-				active_role, sid, cell.x, cell.y, cell.z
-			])
+		hover_info.emit("select %s  (%d,%d deck %d)" % [sid, cell.x, cell.y, cell.z])
 		return
 	_place_cell_ghost(cell, _paint_block_reason(cell), "paint (%d,%d) deck %d" % [cell.x, cell.y, cell.z])
 
@@ -1459,7 +1510,7 @@ func _color_for(room: Dictionary) -> Color:
 	var role := str(room.get("role", "compartment"))
 	var base: Color = ROLE_COLORS.get(role, Color(0.55, 0.58, 0.6))
 	var h := fmod(float(int(room.get("id", 1))) * 0.17, 1.0)
-	return base.lerp(Color.from_hsv(h, 0.35, 0.85), 0.22)
+	return base.lerp(Color.from_hsv(h, 0.45, 0.9), 0.12)
 
 
 func _style_floor_box(box: CSGBox3D, room: Dictionary, deck: int) -> void:
@@ -1468,6 +1519,7 @@ func _style_floor_box(box: CSGBox3D, room: Dictionary, deck: int) -> void:
 	if mat == null:
 		mat = StandardMaterial3D.new()
 		box.material = mat
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mat.albedo_color = col
 	var selected := int(room["id"]) == _selected_id
 	mat.emission_enabled = selected
@@ -1786,6 +1838,8 @@ func _portal_valid(p: Dictionary) -> bool:
 	if bool(p.get("exterior", false)):
 		return not _occupancy.has(_key(b)) and int(p.get("to_room", -1)) == 0
 	if not _occupancy.has(_key(b)):
+		return false
+	if int(_occupancy[_key(a)]) == int(_occupancy[_key(b)]):
 		return false
 	return int(_occupancy[_key(b)]) == int(p.get("to_room", -1))
 
