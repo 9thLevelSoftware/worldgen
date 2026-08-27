@@ -5,7 +5,6 @@ extends SceneTree
 ## and verifies the machine-readable runtime acceptance result.
 
 const FIXTURE := "crates/derelict_core/assets/golden_areas/airlock_2x2.json"
-const EXPECTED_CONTENT_ROOT := "D:/the-synaptic-sea"
 const TIMEOUT_SECONDS := 45.0
 
 var _failed := false
@@ -26,9 +25,11 @@ func _run_checks() -> void:
 		_finish()
 		return
 
-	var expected_root := EXPECTED_CONTENT_ROOT.simplify_path()
+	var expected_root := OS.get_environment("SYNAPTIC_SEA_ROOT").simplify_path()
+	if expected_root.is_empty():
+		expected_root = _repo_root().get_base_dir().path_join("the-synaptic-sea").simplify_path()
 	var actual_root := str(_app._content_root_path).simplify_path()
-	if not actual_root.to_lower() == expected_root.to_lower():
+	if actual_root.to_lower() != expected_root.to_lower():
 		_fail("content root did not resolve to %s: %s" % [expected_root, actual_root])
 
 	var fixture_path := _repo_root().path_join(FIXTURE)
@@ -42,6 +43,23 @@ func _run_checks() -> void:
 	if document.is_empty():
 		_fail("fixture could not be loaded by DerelictAuthor")
 	else:
+		var zone_base := {
+			"from_room": "airlock_01", "to_room": "airlock_01",
+			"from_cell": [0, 0, 0], "to_cell": [1, 0, 0],
+			"module_id": "", "compartment_id": "airlock", "rationale": "runtime preview acceptance",
+		}
+		var hazards: Dictionary = document.get("hazards", {})
+		for hazard in [
+			["fire_zones", "preview_fire", "timed_fire"],
+			["arc_zones", "preview_arc", "electrical_arc"],
+			["breach_zones", "preview_breach", "hull_breach"],
+			["radiation_zones", "preview_radiation", "radiation"],
+		]:
+			var zone := zone_base.duplicate(true)
+			zone["id"] = hazard[1]
+			zone["kind"] = hazard[2]
+			hazards[hazard[0]] = [zone]
+		document["hazards"] = hazards
 		_app._session.start_new(document)
 		if not _app._apply_source_document(document):
 			_fail("fixture hydration failed")
@@ -74,7 +92,7 @@ func _wait_for_preview_result() -> void:
 			var checks: Dictionary = result.get("checks", {})
 			for check in [
 				"structural_collision", "navigation", "objectives", "props", "loot", "vertical_links",
-				"fire", "electrical", "radiation", "breach", "atmosphere", "portal_interaction",
+				"fire", "arc", "electrical", "radiation", "breach", "atmosphere", "portal_interaction",
 			]:
 				if not bool(checks.get(check, false)):
 					_fail("runtime acceptance check was false or missing: %s (%s)" % [check, checks])
