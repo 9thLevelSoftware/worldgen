@@ -610,6 +610,21 @@ fn synchronize_door_entities(
         });
     }
 
+    // Door entities with edge tags are derived from topology. Remove only
+    // those whose tagged portal no longer survives the final damage pass;
+    // untagged authored Door entities remain independently owned.
+    entities.retain(|entity| {
+        if entity.kind != EntityKind::Door {
+            return true;
+        }
+        let edge_tags: Vec<&str> = entity
+            .tags
+            .iter()
+            .filter_map(|tag| tag.strip_prefix("edge:"))
+            .collect();
+        edge_tags.is_empty() || edge_tags.iter().any(|key| required.contains_key(*key))
+    });
+
     // Choose one existing Door per canonical tag before mutating tags. This
     // prevents a malformed multi-tag entity from being reused for two portals.
     let mut selected: BTreeMap<String, u32> = BTreeMap::new();

@@ -331,6 +331,59 @@ fn surviving_interior_door_like_portals_have_runtime_entities_seed_five() {
 }
 
 #[test]
+fn fractured_ship_prunes_orphaned_door_entities_seed_118() {
+    let data = GenData::default_bundle().unwrap();
+    let mut params = GenParams::new("frigate");
+    params.intactness_override = Some(800);
+    let ship = derelict_core::generate_ship(118, &params, &data).unwrap();
+    let required_tags: BTreeSet<String> = ship
+        .topology
+        .portals
+        .iter()
+        .filter(|portal| {
+            matches!(
+                portal.state,
+                EdgeKind::Door | EdgeKind::Locked | EdgeKind::Hatch
+            )
+        })
+        .map(|portal| {
+            let direction = Dir::between(portal.from_cell, portal.to_cell)
+                .expect("door-like portal endpoints are adjacent");
+            format!(
+                "edge:{}",
+                derelict_core::structural::plan::edge_key(portal.from_cell, direction)
+            )
+        })
+        .collect();
+    let removed_tag = "edge:1|h|9|12";
+    assert!(
+        !required_tags.contains(removed_tag),
+        "seed 118 must remove the reviewed fracture portal"
+    );
+    for entity in ship
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::Door)
+    {
+        for tag in entity.tags.iter().filter(|tag| tag.starts_with("edge:")) {
+            assert!(
+                required_tags.contains(tag),
+                "seed 118: orphan Door entity {} retains {tag}",
+                entity.id
+            );
+        }
+    }
+    assert!(
+        !ship
+            .entities
+            .iter()
+            .any(|entity| entity.kind == EntityKind::Door
+                && entity.tags.iter().any(|tag| tag == removed_tag)),
+        "seed 118 must prune the Door entity for {removed_tag}"
+    );
+}
+
+#[test]
 fn interior_entities_stand_on_floor() {
     let data = GenData::default_bundle().unwrap();
     for arch in ["corvette", "frigate"] {
