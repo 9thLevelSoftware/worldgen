@@ -2,6 +2,7 @@
 
 use derelict_core::model::*;
 use derelict_core::role::Role;
+use derelict_core::structural::plan::{Cell, Dir, EdgeKind};
 use derelict_core::{GenData, GenParams};
 use std::collections::BTreeSet;
 
@@ -106,6 +107,108 @@ fn fracture_produces_two_fragments() {
     assert!(
         fractured_seen >= 10,
         "fracture rate suspiciously low: {fractured_seen}/20"
+    );
+}
+
+fn canonical_door_pose(cell: Cell, direction: Dir) -> (GridPos, u8) {
+    match direction {
+        Dir::North => (GridPos::new(cell.x, cell.y, cell.deck), 0),
+        Dir::West => (GridPos::new(cell.x, cell.y, cell.deck), 1),
+        Dir::South => (GridPos::new(cell.x, cell.y + 1, cell.deck), 0),
+        Dir::East => (GridPos::new(cell.x + 1, cell.y, cell.deck), 1),
+    }
+}
+
+#[test]
+fn furnished_and_repaired_interior_doors_stay_coherent_seed_zero() {
+    let data = GenData::default_bundle().unwrap();
+    let mut params = GenParams::new("shuttle");
+    params.intactness_override = Some(6_000);
+    let ship = derelict_core::generate_ship(0, &params, &data).unwrap();
+    let critical_links: BTreeSet<(u16, u16)> = ship
+        .critical_path
+        .windows(2)
+        .map(|pair| (pair[0].min(pair[1]), pair[0].max(pair[1])))
+        .collect();
+    let interior_doors: Vec<_> = ship
+        .topology
+        .portals
+        .iter()
+        .filter(|portal| {
+            !portal.exterior && matches!(portal.state, EdgeKind::Door | EdgeKind::Locked)
+        })
+        .collect();
+    assert!(
+        !interior_doors.is_empty(),
+        "seed 0 should contain interior structural doors"
+    );
+    let mut critical_doors = 0;
+    for portal in interior_doors {
+        let direction = Dir::between(portal.from_cell, portal.to_cell)
+            .expect("interior door endpoints are adjacent");
+        let edge_tag = format!(
+            "edge:{}",
+            derelict_core::structural::plan::edge_key(portal.from_cell, direction)
+        );
+        let doors: Vec<_> = ship
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity.kind == EntityKind::Door && entity.tags.iter().any(|tag| tag == &edge_tag)
+            })
+            .collect();
+        assert_eq!(
+            doors.len(),
+            1,
+            "seed 0: {edge_tag} has {} tagged runtime Door entities",
+            doors.len()
+        );
+        let door = doors[0];
+        let (expected_pos, expected_rotation) = canonical_door_pose(portal.from_cell, direction);
+        assert_eq!(
+            door.pos, expected_pos,
+            "seed 0: {edge_tag} has non-canonical position"
+        );
+        assert_eq!(
+            door.rotation, expected_rotation,
+            "seed 0: {edge_tag} has non-canonical orientation"
+        );
+        let room_link = (
+            portal.from_room.min(portal.to_room),
+            portal.from_room.max(portal.to_room),
+        );
+        match portal.state {
+            EdgeKind::Door => {
+                assert!(!door.locked, "seed 0: {edge_tag} structural Door is locked");
+                assert!(
+                    !door.tags.iter().any(|tag| tag == "sealed"),
+                    "seed 0: {edge_tag} structural Door is sealed"
+                );
+            }
+            EdgeKind::Locked => {
+                assert!(
+                    door.locked,
+                    "seed 0: {edge_tag} structural Locked Door is unlocked"
+                );
+            }
+            _ => unreachable!(),
+        }
+        if critical_links.contains(&room_link) {
+            critical_doors += 1;
+            assert_eq!(
+                portal.state,
+                EdgeKind::Door,
+                "seed 0: critical-path {edge_tag} must remain a structural Door"
+            );
+            assert!(
+                !door.locked,
+                "seed 0: critical-path {edge_tag} runtime Door is locked"
+            );
+        }
+    }
+    assert!(
+        critical_doors > 0,
+        "seed 0 should contain a critical-path interior Door"
     );
 }
 

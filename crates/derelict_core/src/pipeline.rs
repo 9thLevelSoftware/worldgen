@@ -233,21 +233,28 @@ pub fn generate_ship_timed(
             }
         }
     }
-    let (placed, _pre_plan, stamped) = placed.ok_or_else(|| GenError::RetriesExhausted {
+    let (mut placed, _pre_plan, stamped) = placed.ok_or_else(|| GenError::RetriesExhausted {
         attempts: TOPOLOGY_ATTEMPTS,
         last: Box::new(last_err.unwrap_or(GenError::TopologyFailed("no attempt ran".into()))),
     })?;
     lap("topology", &mut timings, &mut mark);
+
+    let critical_path_links: Vec<(PlanRoomId, PlanRoomId)> = placed
+        .critical_path
+        .windows(2)
+        .map(|pair| (pair[0], pair[1]))
+        .collect();
 
     // --- Furnish (locks write back into topology portal states) -------------
     let (mut plan, _stale) =
         compile_authored(&placed.topology, &DefaultModulePicker, &stamped.overrides);
     let furnish_out = furnish::furnish(
         seed,
-        &placed.topology,
+        &mut placed.topology,
         &mut plan,
         &data.furnishing,
         &stamped.skip_furnish,
+        &critical_path_links,
     );
     let mut entities = furnish_out.entities;
     let mut next_entity_id = furnish_out.next_entity_id;
@@ -276,11 +283,6 @@ pub fn generate_ship_timed(
     // --- Damage + recompile + post-damage validation (retries) ---------------
     let mut committed = None;
     let mut last_err: Option<GenError> = None;
-    let critical_path_links: Vec<(PlanRoomId, PlanRoomId)> = placed
-        .critical_path
-        .windows(2)
-        .map(|pair| (pair[0], pair[1]))
-        .collect();
     for attempt in 0..DAMAGE_ATTEMPTS {
         let mut topo2 = placed.topology.clone();
         let mut entities2 = entities.clone();

@@ -245,27 +245,13 @@ fn repair_connectivity(
                                         state: EdgeKind::Door,
                                         exterior: false,
                                     });
-                                    let tag = format!("edge:{key}");
-                                    if !entities.iter().any(|e| {
-                                        e.kind == EntityKind::Door && e.tags.contains(&tag)
-                                    }) {
-                                        let direction = Dir::between(from_cell, to_cell).unwrap();
-                                        let (pos, rotation) =
-                                            door_pos_rotation(from_cell, direction);
-                                        entities.push(EntitySpec {
-                                            id: *next_entity_id,
-                                            kind: EntityKind::Door,
-                                            proto: "door_basic".into(),
-                                            pos,
-                                            rotation,
-                                            locked: false,
-                                            open: false,
-                                            inventory: Vec::new(),
-                                            tags: vec![tag],
-                                        });
-                                        *next_entity_id += 1;
-                                    }
                                 }
+                                synchronize_repaired_door(
+                                    from_cell,
+                                    to_cell,
+                                    entities,
+                                    next_entity_id,
+                                );
                                 connected = true;
                                 break 'search;
                             }
@@ -560,6 +546,41 @@ fn breach_pass(
         });
     }
     dedup_portals(topology);
+}
+
+fn synchronize_repaired_door(
+    from_cell: Cell,
+    to_cell: Cell,
+    entities: &mut Vec<EntitySpec>,
+    next_entity_id: &mut u32,
+) {
+    let direction = Dir::between(from_cell, to_cell).expect("repaired door endpoints are adjacent");
+    let key = crate::structural::plan::edge_key(from_cell, direction);
+    let tag = format!("edge:{key}");
+    let (pos, rotation) = door_pos_rotation(from_cell, direction);
+    if let Some(entity) = entities
+        .iter_mut()
+        .find(|e| e.kind == EntityKind::Door && e.tags.contains(&tag))
+    {
+        entity.pos = pos;
+        entity.rotation = rotation;
+        entity.locked = false;
+        entity.open = false;
+        entity.tags.retain(|t| t != "sealed");
+    } else {
+        entities.push(EntitySpec {
+            id: *next_entity_id,
+            kind: EntityKind::Door,
+            proto: "door_basic".into(),
+            pos,
+            rotation,
+            locked: false,
+            open: false,
+            inventory: Vec::new(),
+            tags: vec![tag],
+        });
+        *next_entity_id += 1;
+    }
 }
 
 fn door_pos_rotation(cell: Cell, direction: Dir) -> (GridPos, u8) {
