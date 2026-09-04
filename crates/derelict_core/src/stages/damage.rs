@@ -42,6 +42,7 @@ pub fn apply_damage(
     intactness: u16,
     arch: &ShipArchetype,
     protected: &[RoomId],
+    protected_links: &[(RoomId, RoomId)],
 ) -> DamageOutcome {
     let mut out = DamageOutcome::default();
     let damage_bp = (10_000 - intactness) as i64;
@@ -58,7 +59,7 @@ pub fn apply_damage(
         &mut out,
     );
     scorch_pass(master_seed, attempt, topology, profile, &mut out);
-    seal_doors_pass(master_seed, topology, entities, profile);
+    seal_doors_pass(master_seed, topology, entities, profile, protected_links);
 
     // Fracture is story-gated: causes that cannot legally sever the ship
     // (pirates, plague) never tear it in half — they take heavier breach
@@ -96,7 +97,7 @@ pub fn apply_damage(
 }
 
 /// After damage, every fragment must be internally connected. Rooms cut off
-/// by pruned doors reconnect through blast openings (Breach portals) to an
+/// by pruned doors reconnect through standing-passable Door portals to an
 /// adjacent reachable room; rooms with no adjacency left are destroyed
 /// outright. Runs until each fragment is one component.
 fn repair_connectivity(
@@ -105,8 +106,8 @@ fn repair_connectivity(
     entities: &mut Vec<EntitySpec>,
     protected: &[RoomId],
 ) {
-    // Each iteration merges (blast opening) or destroys at least one whole
-    // stray COMPONENT, so iterations are bounded by the component count.
+    // Each iteration restores a standing-passable Door or destroys at least
+    // one whole stray COMPONENT, so iterations are bounded by the component count.
     for _ in 0..64 {
         let alive: Vec<RoomId> = topology.rooms.iter().map(|r| r.id).collect();
         if alive.is_empty() {
@@ -114,7 +115,7 @@ fn repair_connectivity(
         }
         let mut adj: BTreeMap<RoomId, Vec<RoomId>> = BTreeMap::new();
         for p in &topology.portals {
-            if !p.exterior && p.to_room != NO_ROOM {
+            if !p.exterior && p.to_room != NO_ROOM && p.state.standing_passable() {
                 adj.entry(p.from_room).or_default().push(p.to_room);
                 adj.entry(p.to_room).or_default().push(p.from_room);
             }
@@ -203,14 +204,49 @@ fn repair_connectivity(
                     for &(d, x, y) in &cells_of[&sid] {
                         for (dx, dy) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
                             if cells_of[&oid].contains(&(d, x + dx, y + dy)) {
-                                topology.portals.push(PortalIntent {
-                                    from_room: sid,
-                                    to_room: oid,
-                                    from_cell: Cell::new(d, x, y),
-                                    to_cell: Cell::new(d, x + dx, y + dy),
-                                    state: EdgeKind::Breach,
-                                    exterior: false,
-                                });
+                                let from_cell = Cell::new(d, x, y);
+                                let to_cell = Cell::new(d, x + dx, y + dy);
+                                let key = crate::structural::plan::edge_key(
+                                    from_cell,
+                                    Dir::between(from_cell, to_cell).unwrap(),
+                                );
+                                let mut restored = false;
+                                for portal in topology.portals.iter_mut() {
+                                    let Some(portal_dir) =
+                                        Dir::between(portal.from_cell, portal.to_cell)
+                                    else {
+                                        continue;
+                                    };
+                                    if !portal.exterior
+                                        && portal.to_room != NO_ROOM
+                                        && crate::structural::plan::edge_key(
+                                            portal.from_cell,
+                                            portal_dir,
+                                        ) == key
+                                    {
+                                        portal.state = EdgeKind::Door;
+                                        let tag = format!("edge:{key}");
+                                        if let Some(entity) = entities.iter_mut().find(|e| {
+                                            e.kind == EntityKind::Door && e.tags.contains(&tag)
+                                        }) {
+                                            entity.locked = false;
+                                            entity.open = false;
+                                            entity.tags.retain(|t| t != "sealed");
+                                        }
+                                        restored = true;
+                                        break;
+                                    }
+                                }
+                                if !restored {
+                                    topology.portals.push(PortalIntent {
+                                        from_room: sid,
+                                        to_room: oid,
+                                        from_cell,
+                                        to_cell,
+                                        state: EdgeKind::Door,
+                                        exterior: false,
+                                    });
+                                }
                                 connected = true;
                                 break 'search;
                             }
@@ -553,12 +589,19 @@ fn seal_doors_pass(
     topology: &mut Topology,
     entities: &mut [EntitySpec],
     profile: &DamageProfile,
+    protected_links: &[(RoomId, RoomId)],
 ) {
     if profile.sealed_door_bp == 0 {
         return;
     }
     for portal in topology.portals.iter_mut() {
         if portal.exterior || portal.state != EdgeKind::Door {
+            continue;
+        }
+        if protected_links.iter().any(|&(a, b)| {
+            (portal.from_room == a && portal.to_room == b)
+                || (portal.from_room == b && portal.to_room == a)
+        }) {
             continue;
         }
         let Some(d) = Dir::between(portal.from_cell, portal.to_cell) else {

@@ -276,6 +276,11 @@ pub fn generate_ship_timed(
     // --- Damage + recompile + post-damage validation (retries) ---------------
     let mut committed = None;
     let mut last_err: Option<GenError> = None;
+    let critical_path_links: Vec<(PlanRoomId, PlanRoomId)> = placed
+        .critical_path
+        .windows(2)
+        .map(|pair| (pair[0], pair[1]))
+        .collect();
     for attempt in 0..DAMAGE_ATTEMPTS {
         let mut topo2 = placed.topology.clone();
         let mut entities2 = entities.clone();
@@ -290,6 +295,7 @@ pub fn generate_ship_timed(
             intactness,
             arch,
             &[placed.entry_room, placed.goal_room],
+            &critical_path_links,
         );
         let drift_of = fragment_drift_map(&outcome);
         let (overrides, hazards) = match remap_stamp_for_drift(
@@ -542,7 +548,10 @@ fn apply_overlays(plan: &mut StructuralPlan, outcome: &damage::DamageOutcome) {
 fn surviving_links(topology: &Topology) -> Vec<(PlanRoomId, PlanRoomId)> {
     let mut links: Vec<(PlanRoomId, PlanRoomId)> = Vec::new();
     for p in &topology.portals {
-        if !p.exterior && p.to_room != crate::structural::plan::NO_ROOM {
+        if !p.exterior
+            && p.to_room != crate::structural::plan::NO_ROOM
+            && p.state.standing_passable()
+        {
             links.push((p.from_room, p.to_room));
         }
     }

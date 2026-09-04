@@ -84,6 +84,14 @@ pub fn apply_module_overrides(
                 continue;
             }
         };
+        if kind == EdgeKind::Breach {
+            plan.edges
+                .get_mut(key)
+                .expect("edge key was present")
+                .module_id
+                .clear();
+            continue;
+        }
         if module_id.is_empty() && kind != EdgeKind::Open {
             plan.errors.push(format!(
                 "empty module_id override for materialized {} edge {key}",
