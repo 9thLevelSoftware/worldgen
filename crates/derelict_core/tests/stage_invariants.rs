@@ -110,6 +110,55 @@ fn fracture_produces_two_fragments() {
 }
 
 #[test]
+fn repaired_interior_portals_have_runtime_door_entities_seed_two() {
+    let data = GenData::default_bundle().unwrap();
+    let mut params = GenParams::new("shuttle");
+    params.intactness_override = Some(6_000);
+    let ship = derelict_core::generate_ship(2, &params, &data).unwrap();
+    let interior_portals: Vec<_> = ship
+        .topology
+        .portals
+        .iter()
+        .filter(|portal| {
+            !portal.exterior
+                && matches!(
+                    portal.state,
+                    derelict_core::structural::plan::EdgeKind::Door
+                        | derelict_core::structural::plan::EdgeKind::Locked
+                        | derelict_core::structural::plan::EdgeKind::Hatch
+                )
+        })
+        .collect();
+    assert!(
+        !interior_portals.is_empty(),
+        "seed 2 should contain an interior door-like portal"
+    );
+    for portal in interior_portals {
+        let direction =
+            derelict_core::structural::plan::Dir::between(portal.from_cell, portal.to_cell)
+                .expect("door-like portal endpoints are adjacent");
+        let edge_tag = format!(
+            "edge:{}",
+            derelict_core::structural::plan::edge_key(portal.from_cell, direction)
+        );
+        let has_endpoint_door = ship.entities.iter().any(|entity| {
+            entity.kind == EntityKind::Door
+                && entity.tags.iter().any(|tag| tag == &edge_tag)
+                && [portal.from_cell, portal.to_cell]
+                    .iter()
+                    .any(|cell| entity.pos == GridPos::new(cell.x, cell.y, cell.deck))
+        });
+        assert!(
+            has_endpoint_door,
+            "seed 2: interior {:?} portal {} -> {} has no endpoint Door entity",
+            portal.state,
+            portal.from_cell.key(),
+            portal.to_cell.key()
+        );
+    }
+}
+
+#[test]
 fn interior_entities_stand_on_floor() {
     let data = GenData::default_bundle().unwrap();
     for arch in ["corvette", "frigate"] {

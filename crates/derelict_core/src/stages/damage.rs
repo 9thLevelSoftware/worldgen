@@ -86,7 +86,13 @@ pub fn apply_damage(
         damage_bp,
     );
 
-    repair_connectivity(topology, &out.fragment_of, entities, protected);
+    repair_connectivity(
+        topology,
+        &out.fragment_of,
+        entities,
+        next_entity_id,
+        protected,
+    );
 
     if matches!(profile.cause, crate::model::CauseOfLoss::Depressurization) {
         for room in &topology.rooms {
@@ -104,6 +110,7 @@ fn repair_connectivity(
     topology: &mut Topology,
     fragment_of: &BTreeMap<RoomId, u8>,
     entities: &mut Vec<EntitySpec>,
+    next_entity_id: &mut u32,
     protected: &[RoomId],
 ) {
     // Each iteration restores a standing-passable Door or destroys at least
@@ -225,14 +232,6 @@ fn repair_connectivity(
                                         ) == key
                                     {
                                         portal.state = EdgeKind::Door;
-                                        let tag = format!("edge:{key}");
-                                        if let Some(entity) = entities.iter_mut().find(|e| {
-                                            e.kind == EntityKind::Door && e.tags.contains(&tag)
-                                        }) {
-                                            entity.locked = false;
-                                            entity.open = false;
-                                            entity.tags.retain(|t| t != "sealed");
-                                        }
                                         restored = true;
                                         break;
                                     }
@@ -246,6 +245,26 @@ fn repair_connectivity(
                                         state: EdgeKind::Door,
                                         exterior: false,
                                     });
+                                    let tag = format!("edge:{key}");
+                                    if !entities.iter().any(|e| {
+                                        e.kind == EntityKind::Door && e.tags.contains(&tag)
+                                    }) {
+                                        let direction = Dir::between(from_cell, to_cell).unwrap();
+                                        let (pos, rotation) =
+                                            door_pos_rotation(from_cell, direction);
+                                        entities.push(EntitySpec {
+                                            id: *next_entity_id,
+                                            kind: EntityKind::Door,
+                                            proto: "door_basic".into(),
+                                            pos,
+                                            rotation,
+                                            locked: false,
+                                            open: false,
+                                            inventory: Vec::new(),
+                                            tags: vec![tag],
+                                        });
+                                        *next_entity_id += 1;
+                                    }
                                 }
                                 connected = true;
                                 break 'search;
@@ -541,6 +560,15 @@ fn breach_pass(
         });
     }
     dedup_portals(topology);
+}
+
+fn door_pos_rotation(cell: Cell, direction: Dir) -> (GridPos, u8) {
+    match direction {
+        Dir::North => (GridPos::new(cell.x, cell.y, cell.deck), 0),
+        Dir::West => (GridPos::new(cell.x, cell.y, cell.deck), 1),
+        Dir::South => (GridPos::new(cell.x, cell.y + 1, cell.deck), 0),
+        Dir::East => (GridPos::new(cell.x + 1, cell.y, cell.deck), 1),
+    }
 }
 
 fn dedup_portals(topology: &mut Topology) {
