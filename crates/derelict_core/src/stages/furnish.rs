@@ -139,10 +139,11 @@ fn door_pos_rotation(cell: Cell, direction: Dir) -> (GridPos, u8) {
 /// `skip_cells` are occupancy cells that already hold an AuthoredProp.
 pub fn furnish(
     master_seed: u64,
-    topology: &Topology,
+    topology: &mut Topology,
     plan: &mut StructuralPlan,
     rules: &FurnishingRules,
     skip_cells: &BTreeSet<(u8, i32, i32)>,
+    protected_links: &[(RoomId, RoomId)],
 ) -> FurnishOutcome {
     let role_of: BTreeMap<RoomId, Role> = topology.rooms.iter().map(|r| (r.id, r.role)).collect();
     let mut entities: Vec<EntitySpec> = Vec::new();
@@ -169,12 +170,25 @@ pub fn furnish(
             .filter_map(|role| rules.door_lock_bp.get(role).copied())
             .max()
             .unwrap_or(0);
-        let locked = !exterior && roll_bp(&mut rng, lock_bp as u32);
+        let on_protected_link = protected_links
+            .iter()
+            .any(|&(a, b)| (rooms.0 == a && rooms.1 == b) || (rooms.0 == b && rooms.1 == a));
+        let rolled_locked = roll_bp(&mut rng, lock_bp as u32);
+        let locked = !exterior && !on_protected_link && rolled_locked;
         let open = !locked && roll_bp(&mut rng, 2500);
         if locked {
             let e = plan.edges.get_mut(&key).unwrap();
             e.kind = EdgeKind::Locked;
             e.module_id = picker.portal(EdgeKind::Locked);
+            if let Some(portal) = topology.portals.iter_mut().find(|portal| {
+                !portal.exterior
+                    && portal.to_room != NO_ROOM
+                    && Dir::between(portal.from_cell, portal.to_cell).map(|direction| {
+                        crate::structural::plan::edge_key(portal.from_cell, direction)
+                    }) == Some(key.clone())
+            }) {
+                portal.state = EdgeKind::Locked;
+            }
         }
         // 2D-addon convention: doors sit on the north (rot 0) or west (rot 1)
         // edge of their tile; canonical east/south edges convert.

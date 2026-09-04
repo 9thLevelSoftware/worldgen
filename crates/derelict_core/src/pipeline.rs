@@ -233,21 +233,28 @@ pub fn generate_ship_timed(
             }
         }
     }
-    let (placed, _pre_plan, stamped) = placed.ok_or_else(|| GenError::RetriesExhausted {
+    let (mut placed, _pre_plan, stamped) = placed.ok_or_else(|| GenError::RetriesExhausted {
         attempts: TOPOLOGY_ATTEMPTS,
         last: Box::new(last_err.unwrap_or(GenError::TopologyFailed("no attempt ran".into()))),
     })?;
     lap("topology", &mut timings, &mut mark);
+
+    let critical_path_links: Vec<(PlanRoomId, PlanRoomId)> = placed
+        .critical_path
+        .windows(2)
+        .map(|pair| (pair[0], pair[1]))
+        .collect();
 
     // --- Furnish (locks write back into topology portal states) -------------
     let (mut plan, _stale) =
         compile_authored(&placed.topology, &DefaultModulePicker, &stamped.overrides);
     let furnish_out = furnish::furnish(
         seed,
-        &placed.topology,
+        &mut placed.topology,
         &mut plan,
         &data.furnishing,
         &stamped.skip_furnish,
+        &critical_path_links,
     );
     let mut entities = furnish_out.entities;
     let mut next_entity_id = furnish_out.next_entity_id;
@@ -290,6 +297,7 @@ pub fn generate_ship_timed(
             intactness,
             arch,
             &[placed.entry_room, placed.goal_room],
+            &critical_path_links,
         );
         let drift_of = fragment_drift_map(&outcome);
         let (overrides, hazards) = match remap_stamp_for_drift(
@@ -542,7 +550,10 @@ fn apply_overlays(plan: &mut StructuralPlan, outcome: &damage::DamageOutcome) {
 fn surviving_links(topology: &Topology) -> Vec<(PlanRoomId, PlanRoomId)> {
     let mut links: Vec<(PlanRoomId, PlanRoomId)> = Vec::new();
     for p in &topology.portals {
-        if !p.exterior && p.to_room != crate::structural::plan::NO_ROOM {
+        if !p.exterior
+            && p.to_room != crate::structural::plan::NO_ROOM
+            && p.state.standing_passable()
+        {
             links.push((p.from_room, p.to_room));
         }
     }

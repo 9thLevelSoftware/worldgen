@@ -570,7 +570,7 @@ fn derelict_bfs(
 ) -> Option<Vec<RoomId>> {
     let mut links = Vec::new();
     for p in &topology.portals {
-        if p.from_room != NO_ROOM && p.to_room != NO_ROOM {
+        if p.from_room != NO_ROOM && p.to_room != NO_ROOM && p.state.standing_passable() {
             links.push((p.from_room, p.to_room));
         }
     }

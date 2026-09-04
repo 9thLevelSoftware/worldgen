@@ -153,6 +153,51 @@ fn floor_override_validates_pre_damage() {
 }
 
 #[test]
+fn breach_edge_override_cannot_materialize_wall() {
+    let from = Cell::new(0, 7, 5);
+    let to = Cell::new(0, 7, 6);
+    let topology = Topology {
+        rooms: vec![
+            derelict_core::structural::plan::RoomSpec {
+                id: 1,
+                role: Role::Airlock,
+                deck: 0,
+                cells: vec![from],
+            },
+            derelict_core::structural::plan::RoomSpec {
+                id: 2,
+                role: Role::Bridge,
+                deck: 0,
+                cells: vec![to],
+            },
+        ],
+        portals: vec![derelict_core::structural::plan::PortalIntent {
+            from_room: 1,
+            to_room: 2,
+            from_cell: from,
+            to_cell: to,
+            state: EdgeKind::Breach,
+            exterior: false,
+        }],
+        verticals: vec![],
+    };
+    let mut overrides = ModuleOverrides::default();
+    overrides.edges.insert("0|h|5|7".into(), WALL_MODULE.into());
+
+    let (plan, stale) = compile_authored(&topology, &DefaultModulePicker, &overrides);
+    assert!(stale.is_empty(), "stale: {stale:?}");
+    let edge = &plan.edges["0|h|5|7"];
+    assert_eq!(edge.kind, EdgeKind::Breach);
+    assert!(edge.portal);
+    assert!(edge.module_id.is_empty());
+    assert!(!edge.wrapper_required);
+    assert!(!plan
+        .placements
+        .iter()
+        .any(|placement| placement.edge_key == "0|h|5|7"));
+}
+
+#[test]
 fn edge_wall_override_survives_and_rebuilds_sockets() {
     let golden = sample();
     let topo = golden.to_topology().unwrap();

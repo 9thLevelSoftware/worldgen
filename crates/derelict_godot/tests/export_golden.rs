@@ -86,6 +86,46 @@ fn export_golden_hashes_match() {
 }
 
 #[test]
+fn freighter_424242_critical_path_exports_standing_passable_portals() {
+    let data = GenData::default_bundle().unwrap();
+    let mut params = GenParams::new("freighter");
+    params.intactness_override = Some(6000);
+    let ship = derelict_core::generate_ship(424242, &params, &data).unwrap();
+    let layout = to_layout_json(
+        &ship,
+        &ExportOptions {
+            kit_id: KIT_ID.to_string(),
+            ..Default::default()
+        },
+    );
+
+    let path = layout["critical_path"]
+        .as_array()
+        .expect("critical_path must be an array");
+    assert!(!path.is_empty(), "critical_path must not be empty");
+    let portals = layout["portals"]
+        .as_array()
+        .expect("portals must be an array");
+    let standing = ["OPEN", "DOOR", "HATCH"];
+    for pair in path.windows(2) {
+        let from = pair[0].as_str().unwrap();
+        let to = pair[1].as_str().unwrap();
+        let portal = portals.iter().find(|portal| {
+            (portal["from_room"].as_str() == Some(from) && portal["to_room"].as_str() == Some(to))
+                || (portal["from_room"].as_str() == Some(to)
+                    && portal["to_room"].as_str() == Some(from))
+        });
+        let portal =
+            portal.unwrap_or_else(|| panic!("missing portal for critical-path hop {from} -> {to}"));
+        assert!(
+            standing.contains(&portal["state"].as_str().unwrap()),
+            "critical-path hop {from} -> {to} is not standing-passable: {}",
+            portal["state"]
+        );
+    }
+}
+
+#[test]
 fn export_layout_has_required_keys() {
     let data = GenData::default_bundle().unwrap();
     let mut params = GenParams::new("shuttle");

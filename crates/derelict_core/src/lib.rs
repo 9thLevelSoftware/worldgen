@@ -25,7 +25,7 @@ pub use model::{
 ///
 /// The model's serialized field is kept as a legacy compatibility detail; all
 /// new engine-facing entry points use this exported contract version.
-pub const GENERATOR_VERSION: u32 = 4;
+pub const GENERATOR_VERSION: u32 = 5;
 pub use authoring::{
     apply_module_overrides, compile_authored, AuthorPalettes, AuthoredHazards, AuthoredProp,
     BuilderKitCatalog, GoldenArea, LinkZone, ModuleOverrides, RoomVars, TopologyDto,
@@ -37,7 +37,7 @@ pub use stages::hull::derive_site_seed;
 #[cfg(test)]
 mod generator_contract_tests {
     #[test]
-    fn generator_version_is_v4() {
-        assert_eq!(crate::GENERATOR_VERSION, 4);
+    fn generator_version_is_v5() {
+        assert_eq!(crate::GENERATOR_VERSION, 5);
     }
 }

@@ -173,9 +173,9 @@ impl EdgeKind {
         }
     }
 
-    /// Passable for flood-fill/nav purposes.
-    pub fn passable(self) -> bool {
-        !matches!(self, EdgeKind::Solid)
+    /// Passable to a standing player in the game.
+    pub fn standing_passable(self) -> bool {
+        matches!(self, EdgeKind::Open | EdgeKind::Door | EdgeKind::Hatch)
     }
 }
 

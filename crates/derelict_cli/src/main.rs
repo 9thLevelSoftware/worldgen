@@ -355,7 +355,7 @@ fn derelict_critical_path(golden: &GoldenArea, topology: &Topology) -> Result<Ve
     let goal = resolve_stable_id(golden, &golden.goal_room)?;
     let mut links = Vec::new();
     for p in &topology.portals {
-        if p.from_room != NO_ROOM && p.to_room != NO_ROOM {
+        if p.from_room != NO_ROOM && p.to_room != NO_ROOM && p.state.standing_passable() {
             links.push((p.from_room, p.to_room));
         }
     }

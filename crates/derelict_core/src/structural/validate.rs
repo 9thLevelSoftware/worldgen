@@ -514,7 +514,7 @@ pub fn validate(
     }
 }
 
-/// Cell adjacency graph from non-SOLID edges + vertical connections, then:
+/// Cell adjacency graph from standing-passable edges + vertical connections, then:
 /// - PreDamage: all occupied cells form one component; critical path rooms
 ///   pairwise reachable.
 /// - PostDamage: cells of each fragment form one component; critical path
@@ -526,13 +526,13 @@ fn check_reachability(
     policy: &ValidationPolicy,
     issues: &mut Vec<ValidationIssue>,
 ) {
-    // Build adjacency: every passable edge (Open/Door/Locked/Hatch/Breach —
-    // Locked counts: it is an openable boundary, not a wall) links its two
-    // source cells; vertical connections link decks.
+    // Build adjacency from standing-passable edges only. Locked and breached
+    // boundaries are not walkable until generation repairs any required link;
+    // vertical connections link decks.
     let keys: Vec<String> = plan.occupancy.keys().cloned().collect();
     let mut links: Vec<(String, String)> = Vec::new();
     for edge in plan.edges.values() {
-        if edge.kind.passable() {
+        if edge.kind.standing_passable() {
             links.push((edge.source_cells[0].key(), edge.source_cells[1].key()));
         }
     }
