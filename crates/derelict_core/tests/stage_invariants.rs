@@ -262,6 +262,75 @@ fn repaired_interior_portals_have_runtime_door_entities_seed_two() {
 }
 
 #[test]
+fn surviving_interior_door_like_portals_have_runtime_entities_seed_five() {
+    let data = GenData::default_bundle().unwrap();
+    let mut params = GenParams::new("shuttle");
+    params.intactness_override = Some(6_000);
+    let ship = derelict_core::generate_ship(5, &params, &data).unwrap();
+    let interior_portals: Vec<_> = ship
+        .topology
+        .portals
+        .iter()
+        .filter(|portal| {
+            !portal.exterior
+                && matches!(
+                    portal.state,
+                    EdgeKind::Door | EdgeKind::Locked | EdgeKind::Hatch
+                )
+        })
+        .collect();
+    assert!(
+        !interior_portals.is_empty(),
+        "seed 5 should contain an interior door-like portal"
+    );
+    for portal in interior_portals {
+        let direction = Dir::between(portal.from_cell, portal.to_cell)
+            .expect("door-like portal endpoints are adjacent");
+        let edge_tag = format!(
+            "edge:{}",
+            derelict_core::structural::plan::edge_key(portal.from_cell, direction)
+        );
+        let doors: Vec<_> = ship
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity.kind == EntityKind::Door && entity.tags.iter().any(|tag| tag == &edge_tag)
+            })
+            .collect();
+        assert_eq!(
+            doors.len(),
+            1,
+            "seed 5: {edge_tag} has {} tagged runtime Door entities",
+            doors.len()
+        );
+        let door = doors[0];
+        let (expected_pos, expected_rotation) = canonical_door_pose(portal.from_cell, direction);
+        assert_eq!(
+            door.pos, expected_pos,
+            "seed 5: {edge_tag} has non-canonical position"
+        );
+        assert_eq!(
+            door.rotation, expected_rotation,
+            "seed 5: {edge_tag} has non-canonical orientation"
+        );
+        let expected_locked = portal.state == EdgeKind::Locked;
+        assert_eq!(
+            door.locked, expected_locked,
+            "seed 5: {edge_tag} runtime lock state disagrees with structural {:?}",
+            portal.state
+        );
+        if expected_locked {
+            assert!(!door.open, "seed 5: {edge_tag} locked Door is open");
+        } else {
+            assert!(
+                !door.tags.iter().any(|tag| tag == "sealed"),
+                "seed 5: {edge_tag} non-locked Door is sealed"
+            );
+        }
+    }
+}
+
+#[test]
 fn interior_entities_stand_on_floor() {
     let data = GenData::default_bundle().unwrap();
     for arch in ["corvette", "frigate"] {

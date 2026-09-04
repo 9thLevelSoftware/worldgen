@@ -93,6 +93,7 @@ pub fn apply_damage(
         next_entity_id,
         protected,
     );
+    synchronize_door_entities(topology, entities, next_entity_id);
 
     if matches!(profile.cause, crate::model::CauseOfLoss::Depressurization) {
         for room in &topology.rooms {
@@ -571,7 +572,7 @@ fn synchronize_repaired_door(
         entities.push(EntitySpec {
             id: *next_entity_id,
             kind: EntityKind::Door,
-            proto: "door_basic".into(),
+            proto: "door".into(),
             pos,
             rotation,
             locked: false,
@@ -580,6 +581,118 @@ fn synchronize_repaired_door(
             tags: vec![tag],
         });
         *next_entity_id += 1;
+    }
+}
+
+/// Reconcile runtime Door entities with the final, post-damage portal set.
+/// Damage can relocate a portal while pruning the entity that used to carry
+/// its edge tag, so this pass is deliberately after every topology mutation.
+fn synchronize_door_entities(
+    topology: &Topology,
+    entities: &mut Vec<EntitySpec>,
+    next_entity_id: &mut u32,
+) {
+    let mut required: BTreeMap<String, (GridPos, u8, bool, EdgeKind)> = BTreeMap::new();
+    for portal in &topology.portals {
+        if !matches!(
+            portal.state,
+            EdgeKind::Door | EdgeKind::Locked | EdgeKind::Hatch
+        ) {
+            continue;
+        }
+        let Some(direction) = Dir::between(portal.from_cell, portal.to_cell) else {
+            continue;
+        };
+        let key = crate::structural::plan::edge_key(portal.from_cell, direction);
+        required.entry(key).or_insert_with(|| {
+            let (pos, rotation) = door_pos_rotation(portal.from_cell, direction);
+            (pos, rotation, portal.exterior, portal.state)
+        });
+    }
+
+    // Choose one existing Door per canonical tag before mutating tags. This
+    // prevents a malformed multi-tag entity from being reused for two portals.
+    let mut selected: BTreeMap<String, u32> = BTreeMap::new();
+    let mut selected_ids: BTreeSet<u32> = BTreeSet::new();
+    let mut duplicate_ids: BTreeSet<u32> = BTreeSet::new();
+    for key in required.keys() {
+        let tag = format!("edge:{key}");
+        let matching: Vec<u32> = entities
+            .iter()
+            .filter(|entity| {
+                entity.kind == EntityKind::Door && entity.tags.iter().any(|t| t == &tag)
+            })
+            .map(|entity| entity.id)
+            .collect();
+        if let Some(id) = matching.into_iter().find(|id| !selected_ids.contains(id)) {
+            selected.insert(key.clone(), id);
+            selected_ids.insert(id);
+        }
+    }
+    for key in required.keys() {
+        let tag = format!("edge:{key}");
+        for id in entities.iter().filter_map(|entity| {
+            (entity.kind == EntityKind::Door && entity.tags.iter().any(|t| t == &tag))
+                .then_some(entity.id)
+        }) {
+            if selected.get(key) != Some(&id) && !selected_ids.contains(&id) {
+                duplicate_ids.insert(id);
+            }
+        }
+    }
+    entities.retain(|entity| !duplicate_ids.contains(&entity.id));
+
+    for (key, (pos, rotation, exterior, state)) in required {
+        let tag = format!("edge:{key}");
+        let id = if let Some(&id) = selected.get(&key) {
+            id
+        } else {
+            let id = *next_entity_id;
+            *next_entity_id += 1;
+            entities.push(EntitySpec {
+                id,
+                kind: EntityKind::Door,
+                proto: if exterior {
+                    "airlock_door".into()
+                } else {
+                    "door".into()
+                },
+                pos,
+                rotation,
+                locked: state == EdgeKind::Locked,
+                open: false,
+                inventory: Vec::new(),
+                tags: vec![tag.clone()],
+            });
+            id
+        };
+
+        let entity = entities
+            .iter_mut()
+            .find(|entity| entity.id == id)
+            .expect("selected or newly created door entity exists");
+        entity.pos = pos;
+        entity.rotation = rotation;
+        entity.proto = if exterior {
+            "airlock_door".into()
+        } else {
+            "door".into()
+        };
+        entity.tags.retain(|t| !t.starts_with("edge:") || t == &tag);
+        if !entity.tags.iter().any(|t| t == &tag) {
+            entity.tags.push(tag);
+        }
+        match state {
+            EdgeKind::Locked => {
+                entity.locked = true;
+                entity.open = false;
+            }
+            EdgeKind::Door | EdgeKind::Hatch => {
+                entity.locked = false;
+                entity.tags.retain(|t| t != "sealed");
+            }
+            _ => unreachable!(),
+        }
     }
 }
 
